@@ -1,0 +1,1 @@
+"""Sprachein- und -ausgabe."""

@@ -1,0 +1,9 @@
+[project]
+name = "jarvis"
+version = "0.1.0"
+description = "J.A.R.V.I.S. – Sprachassistent, der sich mit Claude Code selbst weiterentwickelt"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

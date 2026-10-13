@@ -1,0 +1,38 @@
+# Einstellungen für Jarvis.
+# Du kannst diese Datei selbst bearbeiten – oder Jarvis einfach sagen, was er ändern soll.
+# Änderungen werden nach einem Neustart aktiv.
+
+[nutzer]
+name = ""                 # Dein Vorname (optional)
+anrede = "Sir"            # So spricht Jarvis dich an, z. B. "Sir", "Chef" oder dein Name
+
+[gehirn]
+# Modell für das Gespräch. Schneller/günstiger: "claude-haiku-5-5" oder "claude-sonnet-5-5"
+modell = "claude-opus-5-5"
+aufwand = "low"           # Wie gründlich Jarvis nachdenkt: low, medium, high (low = schnelle Antworten)
+gespraech_fortsetzen = true   # Gespräch nach Neustarts fortsetzen
+websuche = true           # Darf Jarvis im Internet nachschlagen?
+
+[entwickler]
+# Claude Code, der Jarvis' eigenen Code verändert
+modell = "claude-opus-5-5"
+aufwand = "high"
+max_schritte = 150
+reparaturversuche = 2     # Wie oft Claude Code nach einem fehlgeschlagenen Selbsttest nachbessern darf
+automatisch_neustarten = true
+# "dontAsk" = nur die erlaubten Werkzeuge nutzen, nie nachfragen
+berechtigungsmodus = "dontAsk"
+erlaubte_werkzeuge = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "TodoWrite"]
+
+[sprechen]
+engine = "edge"           # "edge" (natürliche Online-Stimme), "offline" (Systemstimme) oder "aus"
+stimme = "de-DE-ConradNeural"   # Andere: de-DE-KillianNeural, de-DE-FlorianMultilingualNeural, de-DE-KatjaNeural …
+tempo = "+8%"
+
+[zuhoeren]
+modus = "aktivierungswort"  # "aktivierungswort" (nur reagieren, wenn "Jarvis" gesagt wird), "immer" oder "aus"
+aktivierungswoerter = ["jarvis", "jervis", "dschawis", "javis"]  # inkl. typischer Hör-Fehler
+sprache = "de-DE"
+nachfrage_sekunden = 10   # So lange nach einer Antwort darfst du ohne "Jarvis" weiterreden
+mikrofon_index = -1       # -1 = Standardmikrofon. Liste mit /mikrofone
+pause_sekunden = 0.8      # So lange Stille, bis ein Satz als beendet gilt
