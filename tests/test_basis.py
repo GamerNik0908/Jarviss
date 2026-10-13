@@ -1,14 +1,14 @@
 """Grundlegende Tests. Laufen ohne Mikrofon, Internet und Claude-Anmeldung."""
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pytest
 
 from jarvis import memory
 from jarvis.app import Jarvis, extract_command
 from jarvis.config import DEFAULTS, load_config
-from jarvis.skills import load_skills, make_skill, schema_from_function
+from jarvis.skills import funktionen, load_skills, make_skill, schema_from_function
 from jarvis.voice.speaker import clean_for_speech
 
 WAKE = ["jarvis", "jervis"]
@@ -31,10 +31,12 @@ def test_config_defaults_and_file():
     for section in DEFAULTS:
         assert section in cfg
     assert cfg["zuhoeren"]["aktivierungswoerter"]
+    assert cfg["entwickler"]["max_schritte_gross"] >= cfg["entwickler"]["max_schritte"]
 
 
 def test_schema_from_function():
-    def f(text: Annotated[str, "Ein Text"], anzahl: int = 2, laut: bool = False) -> str:
+    def f(text: Annotated[str, "Ein Text"], anzahl: int = 2, laut: bool = False,
+          art: Literal["a", "b"] = "a") -> str:
         """Test."""
         return text * anzahl
 
@@ -43,6 +45,7 @@ def test_schema_from_function():
     assert schema["properties"]["text"] == {"type": "string", "description": "Ein Text"}
     assert schema["properties"]["anzahl"]["type"] == "integer"
     assert schema["properties"]["laut"]["default"] is False
+    assert schema["properties"]["art"]["enum"] == ["a", "b"]
 
 
 def test_skills_load_and_run():
@@ -51,6 +54,9 @@ def test_skills_load_and_run():
     by_name = {s.name: s for s in skills}
     assert "datum_und_uhrzeit" in by_name
     assert "Uhr" in asyncio.run(by_name["datum_und_uhrzeit"].ausfuehren({}))
+    gruppen = funktionen()
+    assert gruppen["zeit"].titel == "Datum & Uhrzeit"
+    assert gruppen["timer"].dienste
 
 
 def test_async_skill():
@@ -61,9 +67,19 @@ def test_async_skill():
     assert asyncio.run(make_skill(hallo).ausfuehren({"name": "Tony"})) == "Hallo Tony"
 
 
+def test_frage_text_mit_platzhaltern():
+    def drucken(datei: str, kopien: int = 1) -> str:
+        """Test."""
+        return ""
+
+    s = make_skill(drucken, nachfragen="immer", frage="Soll ich {datei} {kopien}-mal drucken?")
+    assert s.frage_text({"datei": "benchy.stl"}) == "Soll ich benchy.stl 1-mal drucken?"
+
+
 def test_core_tools_exist():
     names = {t.name for t in Jarvis(load_config(), text_only=True).core_tools()}
-    assert {"selbst_verbessern", "letzte_aenderung_rueckgaengig", "aenderungsverlauf"} <= names
+    assert {"selbst_verbessern", "letzte_aenderung_rueckgaengig", "aenderungsverlauf", "an_entwickler",
+            "entwicklungsstatus", "einrichtung_erfassen", "kanal_koppeln", "letzte_fehler"} <= names
 
 
 def test_memory(tmp_path):

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import copy
+import os
 import tomllib
 from pathlib import Path
 from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT_DIR / "data"
+# Laufzeitdaten. Selbsttest und Tests lenken das per Umgebungsvariable in einen leeren Temp-Ordner um.
+DATA_DIR = Path(os.environ.get("JARVIS_DATA_DIR") or ROOT_DIR / "data")
 CONFIG_FILE = ROOT_DIR / "config.toml"
 
 DEFAULTS: dict[str, Any] = {
@@ -24,15 +26,18 @@ DEFAULTS: dict[str, Any] = {
     },
     "entwickler": {
         "modell": "claude-opus-5-5",
+        # "klein": Einstellungen, kleine Fähigkeiten, Reparaturen
         "aufwand": "high",
         "max_schritte": 150,
-        "berechtigungsmodus": "dontAsk",
-        "erlaubte_werkzeuge": [
-            "Read", "Write", "Edit", "Glob", "Grep", "Bash",
-            "WebSearch", "WebFetch", "TodoWrite",
-        ],
+        "max_minuten": 25,
+        # "gross": neue Funktionen mit Diensten, Geräten, Konten
+        "aufwand_gross": "xhigh",
+        "max_schritte_gross": 400,
+        "max_minuten_gross": 75,
         "reparaturversuche": 2,
         "automatisch_neustarten": True,
+        "frage_timeout_minuten": 10,
+        "max_fragen": 3,
     },
     "sprechen": {
         "engine": "edge",
@@ -46,6 +51,9 @@ DEFAULTS: dict[str, Any] = {
         "nachfrage_sekunden": 10,
         "mikrofon_index": -1,
         "pause_sekunden": 0.8,
+    },
+    "ordner": {
+        "eingang": "",   # leer = <Benutzerordner>/Jarvis/Eingang
     },
 }
 
@@ -69,5 +77,5 @@ def load_config(path: Path = CONFIG_FILE) -> dict[str, Any]:
 
 
 def ensure_data_dir() -> Path:
-    DATA_DIR.mkdir(exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
     return DATA_DIR

@@ -1,38 +1,50 @@
-"""Hauptprogramm: verbindet Eingabe (Tastatur/Mikrofon), Gehirn, Sprachausgabe und Entwickler."""
+"""Hauptprogramm: verbindet Eingaben (Tastatur, Mikrofon, Kanäle, Ereignisse), Gehirn, Stimme, Dienste und Entwickler.
+
+Grundregel: Nur die Hauptschleife (run) spricht mit dem Gehirn – ein Gesprächszug nach dem anderen. Alles andere
+(Dienste, Claude Code, Kanäle) reiht sich in self.queue ein. Antworten auf Bestätigungsfragen werden direkt in
+_eingang abgefangen, weil die Hauptschleife in dem Moment auf das Gehirn wartet.
+
+GESCHÜTZTER BEREICH: die Neustart-/Herunterfahr-Logik (run, _herunterfahren, Exit-Codes).
+"""
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import logging
+import os
 import re
+import sys
 import threading
 import time
+import traceback
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated, Any
+from pathlib import Path
+from typing import Any
 
-from jarvis import RESTART_EXIT_CODE, ui
+from jarvis import RESTART_EXIT_CODE, api, einrichtung, protokoll, ui
 from jarvis.brain import Brain
 from jarvis.config import DATA_DIR, ensure_data_dir
 from jarvis.developer import UPDATE_FILE, Developer, DevResult
-from jarvis.skills import Skill, load_skills, make_skill
-from jarvis.voice.listener import Listener, list_microphones
+from jarvis.dienste import Dienstverwaltung
+from jarvis.einrichtung import Einrichtungswert, Programm
+from jarvis.kern import kern_werkzeuge, winget_installieren
+from jarvis.sicherheit import (MAX_EREIGNISSE_PRO_STUNDE, Ratenbegrenzer, Zug, ist_zustimmung, schwaerzen,
+                               sieht_nach_schluessel_aus)
+from jarvis.skills import dienste, funktionen, load_skills
+from jarvis.voice.listener import Listener
 from jarvis.voice.speaker import Speaker
 
 HINTS_FILE = DATA_DIR / "hinweise.json"
+FUNKTIONEN_FILE = DATA_DIR / "funktionen.json"
+LOCK_FILE = DATA_DIR / "jarvis.lock"
 CONNECTION_FAILED_EXIT_CODE = 2
+_log = logging.getLogger("jarvis.app")
 
 _FILLER = re.compile(r"^(hey|hi|hallo|ok|okay|oh|ja|na|yo|moin|servus)\b[\s,.!?]*", re.I)
-
-HELP = """Befehle:
-  /hilfe                Diese Hilfe
-  /verbessern <text>    Auftrag direkt an Claude Code geben (ohne Umweg übers Gespräch)
-  /verlauf              Letzte Selbst-Änderungen anzeigen
-  /rueckgaengig         Letzte Selbst-Änderung rückgängig machen
-  /neu                  Gespräch neu beginnen (Gedächtnis bleibt)
-  /stumm                Sprachausgabe an/aus
-  /mikrofone            Verfügbare Mikrofone anzeigen (für mikrofon_index in config.toml)
-  /neustart             Jarvis neu starten
-  /beenden              Jarvis beenden"""
 
 
 def extract_command(text: str, wakewords: list[str]) -> str | None:
@@ -56,128 +68,196 @@ def greeting(anrede: str) -> str:
     return f"{tageszeit}, {anrede}. Jarvis ist online."
 
 
+@dataclass
+class _Offen:
+    """Eine offene Frage, auf deren Antwort jemand wartet."""
+
+    future: asyncio.Future[str]
+    text: str = ""
+    vorschlag: str = ""
+    kanal: str | None = None
+
+
 class Jarvis:
+    test_pfad = None  # für jarvis.api (nur die Testumgebung setzt das)
+
     def __init__(self, cfg: dict[str, Any], text_only: bool = False):
         self.cfg = cfg
         self.text_only = text_only or cfg["zuhoeren"]["modus"] == "aus"
-        self.anrede = cfg["nutzer"]["anrede"] or "Sir"
-        self.developer = Developer(cfg)
+        self._anrede = cfg["nutzer"]["anrede"] or "Sir"
+        self.developer = Developer(cfg, frage_stellen=self.frage_vom_entwickler,
+                                   bestaetigen_lokal=self.bestaetigen_lokal)
         self.speaker = Speaker({"engine": "aus"} if text_only else cfg["sprechen"])
         self.listener: Listener | None = None
         self.brain: Brain | None = None
+        self.dienste: Dienstverwaltung | None = None
         self.queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.exit_code: int | None = None
+        self.hintergrund: set[asyncio.Task[Any]] = set()
+        self.ausgeschaltet: set[str] = _ausgeschaltete_laden()
         self._followup_until = 0.0
+        self._sprech_lock = asyncio.Lock()
+        self._frage_lock = asyncio.Lock()
+        self._offene_bestaetigung: _Offen | None = None
+        self._offene_entwicklerfrage: _Offen | None = None
+        self._ereignisse: list[tuple[str, str]] = []
+        self._kontext: list[str] = []
+        self._kanaele: dict[str, Callable[[str], Awaitable[None]]] = {}
+        self._rate = Ratenbegrenzer()
+        self._lock_datei: Any = None
 
-    # --- Kern-Werkzeuge (immer vorhanden, brauchen Zugriff auf Jarvis selbst) ---
-    def core_tools(self) -> list[Skill]:
-        app = self
+    def core_tools(self):  # für Selbsttest/Tests
+        return kern_werkzeuge(self)
 
-        async def selbst_verbessern(
-            auftrag: Annotated[str, "Ausführlicher, präziser Auftrag auf Deutsch mit allen Details des Nutzers"],
-        ) -> str:
-            """Verändert Jarvis' eigenen Programmcode mit Claude Code: neue Fähigkeiten hinzufügen, Verhalten oder
-            Persönlichkeit ändern, Einstellungen anpassen (Stimme, Tempo, Aktivierungswort …), Fehler beheben.
-            Läuft im Hintergrund (meist ein paar Minuten). Danach startet Jarvis automatisch neu."""
-            if app.developer.busy:
-                return (f"Abgelehnt: Ich arbeite noch am vorherigen Auftrag ({app.developer.current_task}). "
-                        "Neue Aufträge erst, wenn der fertig ist.")
-            app.developer.start(auftrag, app._on_dev_done)
-            return "Auftrag an Claude Code übergeben. Er läuft jetzt im Hintergrund; ich melde mich, wenn er fertig ist."
-
-        async def entwicklungsstatus() -> str:
-            """Sagt, ob Claude Code gerade an einer Selbstverbesserung arbeitet und woran."""
-            if app.developer.busy:
-                return f"Claude Code arbeitet gerade an: {app.developer.current_task}"
-            return "Gerade läuft keine Selbstverbesserung."
-
-        def aenderungsverlauf() -> str:
-            """Listet die letzten Änderungen auf, die Jarvis an sich selbst vorgenommen hat."""
-            history = app.developer.git.update_history(10) if app.developer.git.available() else []
-            if not history:
-                return "Bisher wurden keine Selbst-Änderungen vorgenommen."
-            return "\n".join(str(e) for e in history)
-
-        async def letzte_aenderung_rueckgaengig() -> str:
-            """Macht die letzte Selbst-Änderung von Jarvis rückgängig und startet danach neu."""
-            if app.developer.busy:
-                return "Geht gerade nicht – Claude Code arbeitet noch an einem Auftrag."
-            subject = await asyncio.to_thread(app.developer.undo_last)
-            app.exit_code = RESTART_EXIT_CODE
-            return f"Rückgängig gemacht: {subject}. Ich starte nach dieser Antwort neu."
-
-        async def neu_starten() -> str:
-            """Startet Jarvis neu (z. B. damit Änderungen wirksam werden)."""
-            if app.developer.busy:
-                return "Lieber nicht – Claude Code arbeitet gerade an mir. Ein Neustart würde das abbrechen."
-            app.exit_code = RESTART_EXIT_CODE
-            return "Neustart nach dieser Antwort."
-
-        async def jarvis_beenden() -> str:
-            """Beendet Jarvis komplett (nur wenn der Nutzer das ausdrücklich will)."""
-            app.exit_code = 0
-            note = " Achtung: Die laufende Selbstverbesserung wird dabei abgebrochen." if app.developer.busy else ""
-            return "Jarvis wird nach dieser Antwort beendet." + note
-
-        return [make_skill(f) for f in (selbst_verbessern, entwicklungsstatus, aenderungsverlauf,
-                                        letzte_aenderung_rueckgaengig, neu_starten, jarvis_beenden)]
-
-    # --- Start ----------------------------------------------------------------
+    # ======================================================================================
+    # Start & Hauptschleife
+    # ======================================================================================
     async def run(self) -> int:
         self.loop = asyncio.get_running_loop()
         ensure_data_dir()
+        protokoll.einrichten()
+        if not self._instanz_sperren():
+            ui.error("Jarvis läuft bereits in einem anderen Fenster.")
+            return 0
+        api._verbinden(self)
         ui.banner()
 
-        skills, errors = load_skills()
+        skills, errors = load_skills(aus=self.ausgeschaltet)
         for e in errors:
             ui.error(e)
         hints = _pop_hints()
         notes = list(hints)
         if errors:
-            notes.append("Einige Fähigkeiten konnten nicht geladen werden (Details in der Konsole). "
+            notes.append("Einige Funktionen konnten nicht geladen werden (Details: letzte_fehler / Konsole). "
                          "Biete an, das per selbst_verbessern zu reparieren.")
+        if self.ausgeschaltet:
+            notes.append(f"Ausgeschaltete Funktionen: {', '.join(sorted(self.ausgeschaltet))}")
         update = _read_update()
         fresh_update = update if update and not update.get("bestaetigt") else None
-        if fresh_update and fresh_update.get("zusammenfassung"):
-            notes.append(f"Gerade frisch an dir geändert: {fresh_update['zusammenfassung']}")
 
-        self.brain = Brain(self.cfg, skills + self.core_tools(), extra_notes=notes)
-        ui.info(f"{len(skills)} Fähigkeiten geladen. Verbinde mit Claude …")
+        self.brain = Brain(self.cfg, skills + kern_werkzeuge(self), extra_notes=notes)
+        self.brain.bestaetiger = self.bestaetigen
+        ui.info(f"{len(funktionen())} Funktionen geladen. Verbinde mit Claude …")
         try:
             await self.brain.connect()
         except Exception as e:  # noqa: BLE001
             ui.error(f"Keine Verbindung zu Claude: {e}")
-            ui.info("Ist Claude Code installiert und angemeldet? Einmal 'claude' im Terminal starten und /login ausführen "
-                    "(oder die Umgebungsvariable ANTHROPIC_API_KEY setzen).")
+            ui.info("Ist Claude Code installiert und angemeldet? Einmal 'claude' im Terminal starten und /login "
+                    "ausführen (oder die Umgebungsvariable ANTHROPIC_API_KEY setzen).")
             return CONNECTION_FAILED_EXIT_CODE
 
         _confirm_update(fresh_update)
+        einrichtung.bei_aenderung(lambda name: self._threadsafe(self._einrichtung_geaendert))
         self._start_inputs()
         for hint in hints:
             await self.say(hint)
-        if fresh_update is None:
-            await self.say(greeting(self.anrede))
-        elif fresh_update.get("art") == "rueckgaengig":
-            await self.say(f"Bin wieder da, {self.anrede}. Die Änderung ist rückgängig gemacht.")
+        if fresh_update is not None:
+            self._ereignis_einreihen(_update_ereignis(fresh_update), "System")
         else:
-            await self.say(f"Bin wieder da, {self.anrede}. Das Update ist aktiv.")
+            await self.say(greeting(self._anrede))
+            fehlend = einrichtung.fehlende()
+            if fehlend:
+                ui.info("Noch nicht eingerichtet: " + ", ".join(f"{w.funktion}/{w.name}" for w in fehlend)
+                        + " – sag \"Jarvis, richte das ein\" oder tippe /einrichtung")
+        self.dienste = Dienstverwaltung(dienste(), lambda text, quelle: self.melden(text, quelle))
+        self.dienste.starten()
+        threading.Thread(target=self._lag_waechter, daemon=True, name="lag-waechter").start()
 
         try:
             while self.exit_code is None:
                 kind, payload = await self.queue.get()
-                if kind == "eingabe":
-                    await self._handle_typed(payload)
-                elif kind == "sprache":
-                    await self._handle_spoken(payload)
-                elif kind == "entwickler":
-                    await self._handle_dev_result(payload)
+                try:
+                    await self._verarbeiten(kind, payload)
+                except Exception:  # noqa: BLE001 – ein Fehler darf die Hauptschleife nie beenden
+                    ui.error(f"Interner Fehler: {traceback.format_exc(limit=3)}")
+                    protokoll.LOGGER.exception("Fehler in der Hauptschleife")
         finally:
-            if self.listener:
-                self.listener.stop()
-            await self.brain.disconnect()
+            await self._herunterfahren()
         return self.exit_code
 
+    async def _verarbeiten(self, kind: str, payload: Any) -> None:
+        if kind == "eingabe":
+            await self._handle_typed(payload)
+        elif kind == "sprache":
+            await self._handle_spoken(payload)
+        elif kind == "ereignis":
+            await self._ereignisse_verarbeiten()
+        elif kind == "kanal":
+            await self._kanal_verarbeiten(*payload)
+        elif kind == "einrichten":
+            name, wert = payload
+            w = einrichtung.finden(name)
+            if w is None:
+                ui.warn(f"Unbekannter Einrichtungswert '{name}'. /einrichtung zeigt alle.")
+            else:
+                ui.info(await self.wert_speichern(w, wert, als_ereignis=False))
+        elif kind == "befehl":
+            from jarvis.befehle import befehl_ausfuehren
+            await befehl_ausfuehren(self, payload)
+        elif kind == "entwickler":
+            await self._handle_dev_result(payload)
+
+    async def _herunterfahren(self) -> None:
+        """Dienste stoppen, Hintergrundaufgaben beenden, Gehirn trennen – und notfalls hart beenden."""
+        code = self.exit_code if self.exit_code is not None else 1
+        watchdog = threading.Timer(20, os._exit, args=(code,))
+        watchdog.daemon = True
+        watchdog.start()
+        if self.dienste:
+            await self.dienste.stoppen(5)
+        if self.developer.busy and self.developer._task is not None:
+            self.developer._task.cancel()  # setzt den Code sofort zurück (siehe Developer.improve)
+            await asyncio.wait({self.developer._task}, timeout=8)
+        for task in list(self.hintergrund):
+            task.cancel()
+        if self.hintergrund:
+            await asyncio.wait(set(self.hintergrund), timeout=3)
+        if self.listener:
+            self.listener.stop()
+        if self.brain:
+            await self.brain.disconnect()
+
+    def _instanz_sperren(self) -> bool:
+        """Verhindert, dass Jarvis zweimal läuft (doppelte Dienste, doppelte Stimme)."""
+        try:
+            self._lock_datei = open(LOCK_FILE, "a+")
+            if os.name == "nt":
+                import msvcrt
+                self._lock_datei.seek(0)
+                msvcrt.locking(self._lock_datei.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(self._lock_datei.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def _lag_waechter(self) -> None:
+        """Erkennt, wenn etwas den Event-Loop blockiert (z. B. time.sleep in einer async-Funktion), und
+        schreibt die Stelle ins Protokoll."""
+        assert self.loop is not None
+        main = threading.main_thread()
+        letzte = [time.monotonic()]
+        gemeldet = False
+        while self.exit_code is None:
+            try:
+                self.loop.call_soon_threadsafe(lambda: letzte.__setitem__(0, time.monotonic()))
+            except RuntimeError:
+                return
+            time.sleep(1)
+            haengt = time.monotonic() - letzte[0] > 4
+            if haengt and not gemeldet:
+                gemeldet = True
+                frame = sys._current_frames().get(main.ident or 0)
+                stelle = "".join(traceback.format_stack(frame)[-6:]) if frame else "?"
+                protokoll.LOGGER.warning("Jarvis hing länger als 4 Sekunden (blockierender Aufruf?):\n%s", stelle)
+            elif not haengt:
+                gemeldet = False
+
+    # ======================================================================================
+    # Eingaben
+    # ======================================================================================
     def _start_inputs(self) -> None:
         threading.Thread(target=self._keyboard_loop, daemon=True, name="keyboard").start()
         if self.text_only:
@@ -193,18 +273,72 @@ class Jarvis:
         self.speaker.on_start = self._on_speaking_start
         self.speaker.on_end = self._on_speaking_end
 
+    def _threadsafe(self, fn: Callable[[], Any]) -> None:
+        """Führt fn im Event-Loop aus – egal aus welchem Thread."""
+        if self.loop is None:
+            return
+        try:
+            if asyncio.get_running_loop() is self.loop:
+                fn()
+                return
+        except RuntimeError:
+            pass
+        self.loop.call_soon_threadsafe(fn)
+
     def _post(self, kind: str, payload: Any) -> None:
         assert self.loop is not None
-        self.loop.call_soon_threadsafe(self.queue.put_nowait, (kind, payload))
+        self.loop.call_soon_threadsafe(self._eingang, kind, payload)
+
+    def _eingang(self, kind: str, payload: Any) -> None:
+        """Läuft im Event-Loop. Antworten auf offene Ja/Nein-Fragen werden hier direkt abgefangen."""
+        offen = self._offene_bestaetigung
+        if offen is not None and not offen.future.done():
+            if kind == "eingabe":
+                ui.user(payload)
+                offen.future.set_result(payload)
+                return
+            if kind == "sprache":
+                text = extract_command(payload, self.cfg["zuhoeren"]["aktivierungswoerter"])
+                text = payload if text is None else text
+                if text:
+                    ui.user(text, "mikrofon")
+                    offen.future.set_result(text)
+                    return
+        self.queue.put_nowait((kind, payload))
 
     def _keyboard_loop(self) -> None:
+        import getpass
+
         while True:
             try:
                 line = input()
             except (EOFError, OSError):
                 return  # keine Tastatur (z. B. ohne Konsole gestartet)
-            if line.strip():
-                self._post("eingabe", line.strip())
+            line = line.strip()
+            if not line:
+                continue
+            if line.lower().startswith("/einrichten"):
+                # Werte nie an Claude schicken und nicht im Fenster stehen lassen.
+                teile = line.split(maxsplit=2)
+                if len(teile) == 3:
+                    print("\x1b[1A\x1b[2K", end="", flush=True)  # eingetippte Zeile wieder löschen
+                    ui.info(f"/einrichten {teile[1]} ••••")
+                    self._post("einrichten", (teile[1].lower(), teile[2]))
+                    continue
+                if len(teile) == 2:
+                    w = einrichtung.finden(teile[1].lower())
+                    if w is not None and not isinstance(w, Programm):
+                        try:
+                            wert = getpass.getpass(f"  Wert für {w.beschreibung} (wird nicht angezeigt): ")
+                        except (EOFError, KeyboardInterrupt):
+                            continue
+                        if wert.strip():
+                            self._post("einrichten", (w.name, wert.strip()))
+                        continue
+            if line.startswith("/"):
+                self._post("befehl", line)
+            else:
+                self._post("eingabe", line)
 
     def _on_speaking_start(self) -> None:
         if self.listener:
@@ -214,13 +348,13 @@ class Jarvis:
         if self.listener:
             self.listener.unmute()
 
-    # --- Eingaben ---------------------------------------------------------------
     async def _handle_typed(self, text: str) -> None:
-        if text.startswith("/"):
-            await self._command(text)
-        else:
-            ui.user(text)
-            await self._converse(text)
+        if sieht_nach_schluessel_aus(text):
+            ui.warn("Das sieht aus wie ein Passwort oder Schlüssel – das schicke ich nicht an Claude. "
+                    "Speichern mit: /einrichten <name>   (/einrichtung zeigt, was fehlt)")
+            return
+        ui.user(text)
+        await self._converse(text, Zug("tastatur", vom_nutzer=True))
 
     async def _handle_spoken(self, text: str) -> None:
         z = self.cfg["zuhoeren"]
@@ -232,88 +366,352 @@ class Jarvis:
                 ui.info(f"(gehört, ignoriert: {text})")
                 return
         if not command:
-            await self.say(f"Ja, {self.anrede}?")
+            await self.say(f"Ja, {self._anrede}?")
             return
-        ui.user(command, spoken=True)
-        await self._converse(command)
+        ui.user(command, "mikrofon")
+        await self._converse(command, Zug("mikrofon", vom_nutzer=True))
 
-    async def _converse(self, text: str) -> None:
+    # ======================================================================================
+    # Gespräch
+    # ======================================================================================
+    async def _zug(self, text: str, zug: Zug) -> AsyncIterator[str]:
+        """Ein Gesprächszug mit dem Gehirn. Hintergrundinfos werden vorangestellt."""
         assert self.brain is not None
+        kontext = list(self._kontext)
+        self._kontext.clear()
+        frage = self._offene_entwicklerfrage
+        if frage is not None and not frage.future.done():
+            kontext.append(f"Claude Code wartet auf eine Antwort auf: „{frage.text}“"
+                           + (f" (Vorschlag: {frage.vorschlag})" if frage.vorschlag else "")
+                           + ". Ist die folgende Nachricht die Antwort, gib sie mit an_entwickler weiter.")
+        elif self.developer.busy and self.developer.status:
+            kontext.append(f"Claude Code arbeitet gerade an: {self.developer.current_task}.")
+        prompt = f"<kontext>\n{chr(10).join(kontext)}\n</kontext>\n\n{text}" if kontext else text
+        self.brain.zug = zug
+        try:
+            async for chunk in self.brain.ask(schwaerzen(prompt)):
+                yield chunk
+        finally:
+            self.brain.zug = None
+
+    async def _converse(self, text: str, zug: Zug) -> None:
         ui.info("…")
         try:
-            async for chunk in self.brain.ask(text):
+            async for chunk in self._zug(text, zug):
                 await self.say(chunk)
         except Exception as e:  # noqa: BLE001
             ui.error(f"Fehler im Gehirn: {e}")
-            await self.say(f"Verzeihung, {self.anrede}, da ist etwas schiefgelaufen.")
+            await self.say(f"Verzeihung, {self._anrede}, da ist etwas schiefgelaufen.")
 
-    async def say(self, text: str) -> None:
-        ui.jarvis(text)
-        await self.speaker.say(text)
-        # Kurz nach einer Antwort darf man ohne Aktivierungswort weiterreden.
-        self._followup_until = time.monotonic() + float(self.cfg["zuhoeren"].get("nachfrage_sekunden", 0))
+    async def say(self, text: str, nachfrage: float | None = None) -> None:
+        async with self._sprech_lock:
+            ui.jarvis(text)
+            await self.speaker.say(schwaerzen(text))
+            # Kurz nach einer Antwort darf man ohne Aktivierungswort weiterreden.
+            dauer = nachfrage if nachfrage is not None else float(self.cfg["zuhoeren"].get("nachfrage_sekunden", 0))
+            self._followup_until = max(self._followup_until, time.monotonic() + dauer)
 
-    # --- Selbstverbesserung -------------------------------------------------------
-    async def _on_dev_done(self, result: DevResult) -> None:
+    def _kontext_merken(self, text: str) -> None:
+        self._kontext.append(text)
+        del self._kontext[:-10]
+
+    # --- Ereignisse ---------------------------------------------------------------------------
+    def _ereignis_einreihen(self, text: str, quelle: str) -> None:
+        """Läuft im Event-Loop. Ereignisse werden gebündelt und je Quelle begrenzt."""
+        if quelle not in ("System", "Claude Code") and \
+                not self._rate.erlaubt(f"ereignis:{quelle}", MAX_EREIGNISSE_PRO_STUNDE):
+            if self._rate.erlaubt(f"ereignis_hinweis:{quelle}", 1):
+                ui.warn(f"Zu viele Meldungen von '{quelle}' – weitere werden diese Stunde ignoriert.")
+            return
+        leer = not self._ereignisse
+        self._ereignisse.append((schwaerzen(text), quelle))
+        if leer:
+            self.queue.put_nowait(("ereignis", None))
+
+    async def _ereignisse_verarbeiten(self) -> None:
+        ereignisse, self._ereignisse = self._ereignisse, []
+        if not ereignisse:
+            return
+        if len(ereignisse) == 1:
+            text, quelle = ereignisse[0]
+            nachricht = f"[Ereignis · {quelle}] {text}"
+        else:
+            quelle = ereignisse[0][1]
+            nachricht = "[Ereignisse]\n" + "\n".join(f"{i}. ({q}) {t}" for i, (t, q) in enumerate(ereignisse, 1))
+        ui.info(nachricht if len(nachricht) < 300 else nachricht[:300] + " …")
+        await self._converse(nachricht, Zug(f"ereignis:{quelle}", vom_nutzer=False))
+        if any(q == "Claude Code" for _, q in ereignisse):
+            self._followup_until = max(self._followup_until, time.monotonic() + 60)
+
+    # --- Kanäle (Handy) -------------------------------------------------------------------------
+    async def kanal_zug(self, text: str, kanal: str, antworten: Callable[[str], Awaitable[None]]) -> None:
+        """Für jarvis.api.kanal_eingabe (Besitzer ist bereits geprüft). Wartet, bis beantwortet."""
+        self._kanaele[kanal] = antworten
+        offen = self._offene_bestaetigung
+        if offen is not None and offen.kanal == kanal and not offen.future.done():
+            ui.user(text, kanal)
+            offen.future.set_result(text)
+            return
+        fertig: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        await self.queue.put(("kanal", (text, kanal, antworten, fertig)))
+        await asyncio.wait_for(asyncio.shield(fertig), timeout=900)
+
+    async def _kanal_verarbeiten(self, text: str, kanal: str, antworten: Callable[[str], Awaitable[None]],
+                                 fertig: asyncio.Future[None]) -> None:
+        ui.user(text, kanal)
+        teile: list[str] = []
+        try:
+            async for chunk in self._zug(f"[{kanal.capitalize()}] {text}", Zug(f"kanal:{kanal}", True, kanal=kanal)):
+                ui.jarvis(chunk)
+                teile.append(chunk)
+            await antworten(schwaerzen("\n\n".join(teile)) or "…")
+        except Exception as e:  # noqa: BLE001
+            ui.error(f"Fehler bei Nachricht über {kanal}: {e}")
+            try:
+                await antworten("Da ist etwas schiefgelaufen.")
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            if not fertig.done():
+                fertig.set_result(None)
+
+    def kopplung_starten(self, kanal: str) -> str:
+        code = api._waechter.koppeln_starten(kanal.lower())
+        ui.kasten(f"Kopplung {kanal}", f"Schick diesen Code an deinen Bot: {code}\n(10 Minuten gültig)")
+        return code
+
+    def kopplung_aufheben(self, kanal: str) -> None:
+        api._waechter.entkoppeln(kanal.lower())
+
+    def kopplung_gemeldet(self, kanal: str) -> None:
+        self.sagen(f"{kanal.capitalize()} ist jetzt mit Ihrem Handy gekoppelt, {self._anrede}.", False)
+
+    # ======================================================================================
+    # Bestätigungen und Rückfragen
+    # ======================================================================================
+    async def bestaetigen(self, frage: str, zug: Zug, timeout: float = 90) -> bool:
+        """Fragt den Nutzer (lokal oder über den Kanal des Zugs) und wartet auf ein klares Ja."""
+        async with self._frage_lock:
+            assert self.loop is not None
+            fut: asyncio.Future[str] = self.loop.create_future()
+            kanal = zug.kanal if zug.kanal in self._kanaele else None
+            self._offene_bestaetigung = _Offen(fut, frage, kanal=kanal)
+            try:
+                if kanal:
+                    await self._kanaele[kanal](f"{frage} (ja/nein)")
+                    ui.info(f"Rückfrage über {kanal}: {frage}")
+                else:
+                    await self.say(frage, nachfrage=timeout)
+                    ui.info("Antworte mit ja oder nein (sprechen oder tippen).")
+                antwort: str | None = await asyncio.wait_for(asyncio.shield(fut), timeout)
+            except asyncio.TimeoutError:
+                antwort = None
+            finally:
+                self._offene_bestaetigung = None
+            ok = ist_zustimmung(antwort)
+            if not ok:
+                ui.info("→ nicht ausgeführt")
+            return ok
+
+    async def bestaetigen_lokal(self, frage: str) -> bool:
+        """Für den Entwickler (Änderungen am Sicherheitsnetz): nur lokale Antworten, 5 Minuten Zeit."""
+        return await self.bestaetigen(frage, Zug("tastatur", vom_nutzer=True), timeout=300)
+
+    async def frage_vom_entwickler(self, frage: str, vorschlag: str) -> str | None:
+        """Rückfrage von Claude Code: geht als Ereignis ans Gehirn; die Antwort kommt über an_entwickler."""
+        assert self.loop is not None
+        fut: asyncio.Future[str] = self.loop.create_future()
+        self._offene_entwicklerfrage = _Offen(fut, frage, vorschlag)
+        self._ereignis_einreihen(
+            f"Claude Code fragt: {frage}" + (f" Vorschlag: {vorschlag}." if vorschlag else "")
+            + " Stell dem Nutzer die Frage kurz in deinen Worten (mit Vorschlag). Seine Antwort gibst du mit "
+              "an_entwickler weiter. Steht die Antwort eindeutig in deinem Gedächtnis, antworte selbst mit "
+              "an_entwickler und sag dem Nutzer, was du geantwortet hast.", "Claude Code")
+        timeout = float(self.cfg["entwickler"].get("frage_timeout_minuten", 10)) * 60
+        try:
+            try:
+                return await asyncio.wait_for(asyncio.shield(fut), timeout / 2)
+            except asyncio.TimeoutError:
+                self._ereignis_einreihen(f"Claude Code wartet noch auf die Antwort auf: {frage} – erinnere den "
+                                         "Nutzer kurz daran.", "Claude Code")
+            return await asyncio.wait_for(asyncio.shield(fut), timeout / 2)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._offene_entwicklerfrage = None
+
+    def entwicklerfrage_beantworten(self, antwort: str) -> bool:
+        frage = self._offene_entwicklerfrage
+        if frage is None or frage.future.done():
+            return False
+        frage.future.set_result(schwaerzen(antwort))
+        return True
+
+    # ======================================================================================
+    # Selbstverbesserung
+    # ======================================================================================
+    async def entwicklung_fertig(self, result: DevResult) -> None:
         await self.queue.put(("entwickler", result))
 
     async def _handle_dev_result(self, result: DevResult) -> None:
-        await self.say(result.zusammenfassung)
+        if result.abgebrochen:
+            await self.say(result.zusammenfassung)
+            return
         if result.erfolg and result.geaendert:
+            text = f"Fertig, {self._anrede}. {result.zusammenfassung}"
+            if result.einschraenkungen:
+                text += f" Hinweis: {result.einschraenkungen[0]}"
+            await self.say(text)
             if self.cfg["entwickler"].get("automatisch_neustarten", True):
                 await self.say("Ich starte mich kurz neu, um das Update zu aktivieren.")
                 self.exit_code = RESTART_EXIT_CODE
             else:
                 await self.say("Das Update wird beim nächsten Neustart aktiv.")
+            return
+        if result.erfolg:
+            self._ereignis_einreihen(f"Claude Code ist fertig, es war keine Änderung nötig: {result.zusammenfassung}",
+                                     "Claude Code")
+            return
+        self._ereignis_einreihen(f"Claude Code ist fertig, aber es hat nicht geklappt: {result.zusammenfassung} "
+                                 "Sag es dem Nutzer kurz und biete an, es noch einmal zu versuchen.", "Claude Code")
 
-    # --- Konsolenbefehle ------------------------------------------------------------
-    async def _command(self, line: str) -> None:
-        cmd, _, arg = line[1:].partition(" ")
-        cmd = cmd.lower()
-        if cmd in ("hilfe", "help", "?"):
-            ui.info(HELP)
-        elif cmd in ("beenden", "exit", "quit"):
-            self.exit_code = 0
-        elif cmd == "neustart":
-            if self.developer.busy:
-                ui.warn("Claude Code arbeitet gerade an mir – ein Neustart würde das abbrechen. "
-                        "Warte kurz oder nutze /beenden.")
-            else:
-                self.exit_code = RESTART_EXIT_CODE
-        elif cmd == "neu":
-            assert self.brain is not None
-            await self.brain.reset()
-            ui.info("Neues Gespräch begonnen.")
-        elif cmd == "stumm":
-            if self.text_only:
-                ui.info("Im Textmodus gibt es keine Sprachausgabe.")
-            else:
-                self.speaker.engine = "aus" if self.speaker.enabled else self.cfg["sprechen"]["engine"]
-                ui.info("Sprachausgabe " + ("an." if self.speaker.enabled else "aus."))
-        elif cmd == "mikrofone":
+    # ======================================================================================
+    # Einrichtung
+    # ======================================================================================
+    async def wert_erfassen(self, w: Einrichtungswert) -> None:
+        from jarvis import eingabefenster
+
+        wert = await eingabefenster.abfragen(f"Jarvis – {w.beschreibung}", w.anleitung_text(), geheim=w.geheim)
+        if wert is None:
+            self._ereignis_einreihen(f"Die Eingabe für {w.beschreibung} wurde abgebrochen oder das Fenster ließ sich "
+                                     f"nicht öffnen. Alternative: am PC tippen: /einrichten {w.name}", "System")
+            return
+        await self.wert_speichern(w, wert, als_ereignis=True)
+
+    async def wert_speichern(self, w: Einrichtungswert, wert: str, als_ereignis: bool) -> str:
+        """Speichert einen Einrichtungswert, prüft ihn (falls die Funktion das kann) und meldet das Ergebnis."""
+        w.setzen(wert.strip())
+        ergebnis = f"{w.beschreibung} gespeichert."
+        if w.pruefen is not None:
             try:
-                for i, name in enumerate(list_microphones()):
-                    ui.info(f"{i}: {name}")
+                ok_text = await asyncio.wait_for(asyncio.to_thread(w.pruefen, w.wert()), timeout=20)
+                ergebnis += f" Prüfung erfolgreich: {ok_text}"
             except Exception as e:  # noqa: BLE001
-                ui.error(f"Mikrofone können nicht aufgelistet werden: {e}")
-        elif cmd == "verbessern" and arg.strip():
-            if self.developer.busy:
-                ui.warn(f"Claude Code arbeitet noch an: {self.developer.current_task}")
-            else:
-                self.developer.start(arg.strip(), self._on_dev_done)
-        elif cmd == "verlauf":
-            history = self.developer.git.update_history(20) if self.developer.git.available() else []
-            for entry in history or ["Noch keine Selbst-Änderungen."]:
-                ui.info(str(entry))
-        elif cmd == "rueckgaengig":
-            try:
-                subject = await asyncio.to_thread(self.developer.undo_last)
-                ui.info(f"Rückgängig gemacht: {subject}")
-                self.exit_code = RESTART_EXIT_CODE
-            except Exception as e:  # noqa: BLE001
-                ui.error(str(e))
+                ergebnis += f" Prüfung fehlgeschlagen: {schwaerzen(e)}"
+        ergebnis = schwaerzen(ergebnis)
+        if als_ereignis:
+            self._ereignis_einreihen(f"Einrichtung: {ergebnis} Fahre mit der Einrichtung fort, falls noch etwas "
+                                     "fehlt (einrichtung_anleitung), sonst sag, wie man die Funktion benutzt.", "System")
         else:
-            ui.warn("Unbekannter Befehl. /hilfe zeigt alle Befehle.")
+            self._kontext_merken(f"Einrichtung: {ergebnis}")
+        return ergebnis
+
+    def _einrichtung_geaendert(self) -> None:
+        if self.dienste:
+            self.dienste.einrichtung_geaendert()
+
+    async def programm_installieren(self, w: Programm) -> None:
+        assert w.winget
+        try:
+            code = await winget_installieren(w.winget)
+        except Exception as e:  # noqa: BLE001
+            self._ereignis_einreihen(f"Die Installation von {w.beschreibung} ist fehlgeschlagen: {e}", "System")
+            return
+        if w.vorhanden:
+            self._einrichtung_geaendert()
+            self._ereignis_einreihen(f"{w.beschreibung} wurde installiert und gefunden.", "System")
+        else:
+            self._ereignis_einreihen(f"Die Installation von {w.beschreibung} ist beendet (Code {code}), aber das "
+                                     f"Programm wurde nicht gefunden. Anleitung:\n{w.anleitung_text()}", "System")
+
+    # ======================================================================================
+    # Funktionen an/aus, Übersicht
+    # ======================================================================================
+    def funktion_schalten(self, funktion: str, an: bool) -> None:
+        if an:
+            self.ausgeschaltet.discard(funktion)
+        else:
+            self.ausgeschaltet.add(funktion)
+        FUNKTIONEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        FUNKTIONEN_FILE.write_text(json.dumps({"aus": sorted(self.ausgeschaltet)}), encoding="utf-8")
+
+    def funktionen_text(self, nur: str = "") -> str:
+        dienst_status = {s.split(" ", 1)[0]: s for s in (self.dienste.status() if self.dienste else [])}
+        zeilen = []
+        for f in sorted(funktionen().values(), key=lambda f: f.name):
+            if nur and f.name != nur:
+                continue
+            fehlend = einrichtung.fehlende(f.name)
+            zustand = "Einrichtung fehlt: " + ", ".join(w.beschreibung for w in fehlend) if fehlend else "bereit"
+            zeile = f"{f.name} – {f.titel} [{zustand}]; Werkzeuge: {', '.join(s.name for s in f.skills) or '–'}"
+            if f.dienste:
+                zeile += "; Dienste: " + "; ".join(dienst_status.get(d.name, d.name) for d in f.dienste)
+            zeilen.append(zeile)
+        for name in sorted(self.ausgeschaltet):
+            if not nur or nur == name:
+                zeilen.append(f"{name} – ausgeschaltet")
+        return "\n".join(zeilen) if zeilen else "Keine Funktionen gefunden."
+
+    # ======================================================================================
+    # Backend für jarvis.api (Funktionen rufen das über api.sagen/melden/… auf)
+    # ======================================================================================
+    def sagen(self, text: str, wichtig: bool) -> None:
+        async def proaktiv() -> None:
+            await self.say(text)
+            self._kontext_merken(f"Du hast von dir aus gesagt: {text}")
+
+        self._threadsafe(lambda: self._aufgabe(proaktiv(), "sagen"))
+
+    def melden(self, text: str, quelle: str) -> None:
+        self._threadsafe(lambda: self._ereignis_einreihen(text, quelle))
+
+    def im_hintergrund(self, arbeit: Any, name: str) -> None:
+        async def lauf() -> None:
+            try:
+                if asyncio.iscoroutine(arbeit):
+                    await arbeit
+                else:
+                    ergebnis = await asyncio.to_thread(arbeit)
+                    if asyncio.iscoroutine(ergebnis):
+                        await ergebnis
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                hinweis = protokoll.fehler_merken("hintergrund", e, f"Hintergrundaufgabe {name}")
+                self._ereignis_einreihen(f"Hintergrundaufgabe '{name}' ist fehlgeschlagen: {hinweis}", "System")
+
+        self._threadsafe(lambda: self._aufgabe(lauf(), name))
+
+    def _aufgabe(self, coro: Any, name: str) -> asyncio.Task[Any]:
+        assert self.loop is not None
+        task = self.loop.create_task(coro, name=name, context=contextvars.Context())
+        self.hintergrund.add(task)
+        task.add_done_callback(self.hintergrund.discard)
+        return task
+
+    def abspielen(self, datei: Path) -> None:
+        async def spielen() -> None:
+            async with self._sprech_lock:
+                await self.speaker.abspielen(datei)
+
+        self._threadsafe(lambda: self._aufgabe(spielen(), "abspielen"))
+
+    async def denken(self, anweisung: str, daten: str, schema: dict[str, Any] | None) -> Any:
+        return await api._echtes_denken(anweisung, daten, schema)
+
+    def anrede(self) -> str:
+        return self._anrede
+
+
+# ==========================================================================================
+# Hilfsfunktionen
+# ==========================================================================================
+
+def _ausgeschaltete_laden() -> set[str]:
+    try:
+        return set(json.loads(FUNKTIONEN_FILE.read_text(encoding="utf-8")).get("aus", []))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return set()
 
 
 def _pop_hints() -> list[str]:
@@ -338,3 +736,19 @@ def _confirm_update(update: dict[str, Any] | None) -> None:
     if update:
         update["bestaetigt"] = True
         UPDATE_FILE.write_text(json.dumps(update, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _update_ereignis(update: dict[str, Any]) -> str:
+    if update.get("art") == "rueckgaengig":
+        return (f"Neustart: {update.get('zusammenfassung', 'Die letzte Änderung wurde rückgängig gemacht.')} "
+                "Sag dem Nutzer kurz Bescheid.")
+    text = f"Neustart nach Update „{update.get('titel') or ''}“. Neu: {update.get('zusammenfassung', '')}"
+    if update.get("naechste_schritte"):
+        text += f" Was der Nutzer noch tun muss: {update['naechste_schritte']}"
+    fehlend = einrichtung.fehlende()
+    if fehlend:
+        text += " Noch nicht eingerichtet: " + "; ".join(f"{w.beschreibung} ({w.name})" for w in fehlend) + "."
+    if update.get("ausprobieren"):
+        text += f" Beispielsatz zum Ausprobieren: „{update['ausprobieren']}“."
+    return text + (" Begrüße den Nutzer kurz (ein bis zwei Sätze) und sag, was neu ist. Fehlt eine Einrichtung, "
+                   "biete an, sie jetzt gemeinsam zu machen (meist zwei Minuten); sonst nenne den Beispielsatz.")

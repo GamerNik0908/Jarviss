@@ -1,4 +1,4 @@
-"""Grundlegende Steuerung des PCs: Webseiten, Programme, Systeminfos."""
+"""PC-Steuerung: Webseiten und Programme öffnen, Systeminfos"""
 
 from __future__ import annotations
 
@@ -11,10 +11,12 @@ import webbrowser
 from typing import Annotated
 from urllib.parse import quote_plus
 
-from jarvis.skills import skill
+from jarvis.api import eingang_ordner, skill
+
+_AUSFUEHRBAR = (".exe", ".bat", ".cmd", ".ps1", ".vbs", ".msi", ".lnk", ".scr", ".hta", ".com", ".jar", ".js")
 
 
-@skill
+@skill(nachfragen="wenn_fremd", frage="Soll ich {url} öffnen?")
 def webseite_oeffnen(url: Annotated[str, "Vollständige Adresse, z. B. https://youtube.com"]) -> str:
     """Öffnet eine Webseite im Standardbrowser."""
     if not url.startswith(("http://", "https://")):
@@ -30,11 +32,14 @@ def im_web_suchen(suchbegriff: str) -> str:
     return f"Suche nach '{suchbegriff}' geöffnet."
 
 
-@skill
+@skill(nachfragen="wenn_fremd", frage="Soll ich {programm} starten?")
 def programm_starten(
     programm: Annotated[str, "Programmname oder Pfad, z. B. 'notepad', 'calc', 'spotify' oder ein Dateipfad"],
 ) -> str:
     """Startet ein Programm oder öffnet eine Datei bzw. einen Ordner auf dem PC."""
+    pfad = os.path.abspath(os.path.expandvars(os.path.expanduser(programm)))
+    if pfad.lower().endswith(_AUSFUEHRBAR) and pfad.lower().startswith(str(eingang_ordner()).lower()):
+        return "Abgelehnt: Programme aus dem Eingangsordner (Dateien von außen) starte ich aus Sicherheitsgründen nicht."
     try:
         if sys.platform == "win32":
             path = os.path.expandvars(os.path.expanduser(programm))

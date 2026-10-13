@@ -1,20 +1,26 @@
-"""Fähigkeiten (Skills) von Jarvis.
+"""Funktionen von Jarvis.
 
-Jede Datei in diesem Ordner (außer solchen, die mit "_" beginnen) wird beim Start
-automatisch geladen. Eine Fähigkeit ist einfach eine Python-Funktion mit
-Typ-Hinweisen und Docstring, markiert mit @skill:
+Jede Datei (oder jedes Paket) in diesem Ordner ist eine Funktion und wird beim Start automatisch geladen
+(Ausnahme: Namen, die mit "_" beginnen). Die erste Zeile des Modul-Docstrings ist der Name der Funktion
+für den Nutzer, z. B. "Telegram: Nachrichten zwischen Handy und Jarvis".
+
+Bausteine (Details in jarvis/api.py und CLAUDE.md):
 
     from typing import Annotated
-    from jarvis.skills import skill
+    from jarvis.api import skill, dienst
 
     @skill
     def wuerfeln(seiten: Annotated[int, "Anzahl der Seiten"] = 6) -> str:
         \"\"\"Würfelt eine Zahl zwischen 1 und `seiten`.\"\"\"
-        import random
-        return f"Gewürfelt: {random.randint(1, seiten)}"
+        ...
 
-Der Docstring ist die Beschreibung, die Jarvis' Gehirn sieht. Die Funktion darf
-synchron oder `async` sein und sollte einen kurzen Text zurückgeben.
+    @skill(nachfragen="immer", frage="Soll ich {datei} wirklich drucken?")
+    def drucken(datei: str) -> str: ...
+
+    @dienst
+    async def empfang() -> None:          # läuft dauerhaft im Hintergrund
+        while True:
+            ...
 """
 
 from __future__ import annotations
@@ -23,10 +29,18 @@ import asyncio
 import importlib
 import inspect
 import pkgutil
+import re
+import string
+import sys
 import traceback
 import types
-from dataclasses import dataclass
-from typing import Annotated, Any, Callable, Union, get_args, get_origin, get_type_hints
+from dataclasses import dataclass, field
+from typing import Annotated, Any, Callable, Literal, Union, get_args, get_origin, get_type_hints
+
+from jarvis.einrichtung import funktion_von_modul
+from jarvis.sicherheit import NACHFRAGEN
+
+NAME_MUSTER = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 @dataclass
@@ -35,6 +49,17 @@ class Skill:
     beschreibung: str
     schema: dict[str, Any]
     funktion: Callable[..., Any]
+    nachfragen: str = "nie"          # "nie" | "wenn_fremd" | "immer"
+    frage: str = ""                  # Bestätigungsfrage, darf {parameter} enthalten
+    fremde_inhalte: bool = False     # Ergebnis enthält Inhalte Dritter (Webseiten, fremde Nachrichten …)
+
+    @property
+    def modul(self) -> str:
+        return self.funktion.__module__
+
+    @property
+    def gruppe(self) -> str:
+        return funktion_von_modul(self.modul)
 
     async def ausfuehren(self, args: dict[str, Any]) -> str:
         if inspect.iscoroutinefunction(self.funktion):
@@ -43,8 +68,47 @@ class Skill:
             result = await asyncio.to_thread(self.funktion, **args)
         return "Erledigt." if result is None else str(result)
 
+    def frage_text(self, args: dict[str, Any]) -> str:
+        if self.frage:
+            try:
+                return self.frage.format(**{**_defaults(self.funktion), **args})
+            except (KeyError, IndexError, ValueError):
+                pass
+        details = ", ".join(f"{k}={v!r}" for k, v in args.items())
+        return f"Darf ich '{self.name}' ausführen ({details})?"
+
+
+@dataclass
+class Dienst:
+    name: str
+    funktion: Callable[[], Any]
+    beschreibung: str = ""
+
+    @property
+    def modul(self) -> str:
+        return self.funktion.__module__
+
+    @property
+    def gruppe(self) -> str:
+        return funktion_von_modul(self.modul)
+
+
+@dataclass
+class FunktionInfo:
+    name: str
+    titel: str
+    skills: list[Skill] = field(default_factory=list)
+    dienste: list[Dienst] = field(default_factory=list)
+
 
 _REGISTRY: dict[str, Skill] = {}
+_DIENSTE: dict[str, Dienst] = {}
+_HINWEISE: dict[str, str] = {}
+
+
+def _defaults(fn: Callable[..., Any]) -> dict[str, Any]:
+    return {n: p.default for n, p in inspect.signature(fn).parameters.items()
+            if p.default is not inspect.Parameter.empty}
 
 
 def _type_to_schema(tp: Any) -> dict[str, Any]:
@@ -56,6 +120,9 @@ def _type_to_schema(tp: Any) -> dict[str, Any]:
             if isinstance(m, str):
                 schema["description"] = m
         return schema
+    if origin is Literal:
+        werte = list(get_args(tp))
+        return {"type": "string" if all(isinstance(w, str) for w in werte) else "integer", "enum": werte}
     if origin is Union or isinstance(tp, types.UnionType):
         non_none = [a for a in get_args(tp) if a is not type(None)]
         if len(non_none) == 1:
@@ -93,45 +160,122 @@ def schema_from_function(fn: Callable[..., Any]) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required}
 
 
-def skill(fn: Callable[..., Any] | None = None, *, name: str | None = None,
-          beschreibung: str | None = None) -> Any:
-    """Decorator: registriert eine Funktion als Fähigkeit von Jarvis."""
+def _pruefe_frage(name: str, frage: str, fn: Callable[..., Any]) -> None:
+    params = set(inspect.signature(fn).parameters)
+    for _, feld, _, _ in string.Formatter().parse(frage):
+        if feld and feld.split(".")[0].split("[")[0] not in params:
+            raise ValueError(f"Fähigkeit '{name}': Platzhalter {{{feld}}} in frage ist kein Parameter")
+
+
+def skill(fn: Callable[..., Any] | None = None, *, name: str | None = None, beschreibung: str | None = None,
+          nachfragen: str = "nie", frage: str = "", fremde_inhalte: bool = False) -> Any:
+    """Decorator: macht eine Funktion zu einem Werkzeug, das Jarvis' Gehirn aufrufen kann.
+
+    nachfragen="immer"      -> Jarvis fragt den Nutzer vor JEDER Ausführung (Drucken, Nachrichten an andere,
+                               Löschen, Käufe, Geräte mit Hitze/Motor). frage= ist der Bestätigungstext.
+    nachfragen="wenn_fremd" -> fragt nur, wenn der Auftrag nicht direkt vom Nutzer kommt oder im selben Zug
+                               fremde Inhalte gelesen wurden (dauerhafte Änderungen, Programme starten).
+    fremde_inhalte=True     -> das Ergebnis enthält Inhalte Dritter (Webseiten, fremde Nachrichten, E-Mails).
+    """
 
     def register(f: Callable[..., Any]) -> Callable[..., Any]:
         skill_name = name or f.__name__
         desc = beschreibung or inspect.getdoc(f) or ""
         if not desc:
             raise ValueError(f"Fähigkeit '{skill_name}' braucht einen Docstring als Beschreibung.")
+        if not NAME_MUSTER.match(skill_name):
+            raise ValueError(f"Ungültiger Name '{skill_name}' (nur a-z, A-Z, 0-9, _ und -; keine Umlaute)")
+        if nachfragen not in NACHFRAGEN:
+            raise ValueError(f"Fähigkeit '{skill_name}': nachfragen muss eins von {NACHFRAGEN} sein")
+        if frage:
+            _pruefe_frage(skill_name, frage, f)
         existing = _REGISTRY.get(skill_name)
-        if existing and existing.funktion.__module__ != f.__module__:
-            raise ValueError(
-                f"Fähigkeit '{skill_name}' existiert doppelt "
-                f"({existing.funktion.__module__} und {f.__module__})."
-            )
-        _REGISTRY[skill_name] = Skill(skill_name, desc, schema_from_function(f), f)
+        if existing and existing.modul != f.__module__:
+            raise ValueError(f"Fähigkeit '{skill_name}' existiert doppelt ({existing.modul} und {f.__module__}).")
+        _REGISTRY[skill_name] = Skill(skill_name, desc, schema_from_function(f), f, nachfragen, frage,
+                                      fremde_inhalte)
         return f
 
     return register(fn) if fn is not None else register
 
 
-def make_skill(fn: Callable[..., Any], name: str | None = None) -> Skill:
+def dienst(fn: Callable[[], Any] | None = None, *, name: str | None = None) -> Any:
+    """Decorator: eine `async def` ohne Parameter, die dauerhaft im Hintergrund läuft (Nachrichten empfangen,
+    Ordner überwachen, Druckstatus abfragen …). Jarvis startet sie nach dem Start, startet sie nach Abstürzen
+    neu und beendet sie beim Herunterfahren. Fehlt eine Einrichtung (FehlendeEinrichtung), wartet sie, bis
+    der Wert eingerichtet ist."""
+
+    def register(f: Callable[[], Any]) -> Callable[[], Any]:
+        dienst_name = name or f.__name__
+        if not inspect.iscoroutinefunction(f):
+            raise TypeError(f"Dienst '{dienst_name}' muss eine 'async def' sein")
+        pflicht = [p for p in inspect.signature(f).parameters.values() if p.default is inspect.Parameter.empty]
+        if pflicht:
+            raise TypeError(f"Dienst '{dienst_name}' darf keine Pflicht-Parameter haben")
+        if not NAME_MUSTER.match(dienst_name):
+            raise ValueError(f"Ungültiger Dienstname '{dienst_name}'")
+        existing = _DIENSTE.get(dienst_name)
+        if existing and existing.modul != f.__module__:
+            raise ValueError(f"Dienst '{dienst_name}' existiert doppelt ({existing.modul} und {f.__module__}).")
+        _DIENSTE[dienst_name] = Dienst(dienst_name, f, (inspect.getdoc(f) or "").split("\n")[0])
+        return f
+
+    return register(fn) if fn is not None else register
+
+
+def hinweis_registrieren(modul: str, text: str) -> None:
+    _HINWEISE[modul] = text.strip()
+
+
+def hinweise() -> list[str]:
+    return list(_HINWEISE.values())
+
+
+def dienste() -> list[Dienst]:
+    return list(_DIENSTE.values())
+
+
+def make_skill(fn: Callable[..., Any], name: str | None = None, *, nachfragen: str = "nie",
+               frage: str = "") -> Skill:
     """Erzeugt ein Skill-Objekt, ohne es global zu registrieren (für Kern-Werkzeuge)."""
-    return Skill(name or fn.__name__, inspect.getdoc(fn) or "", schema_from_function(fn), fn)
+    return Skill(name or fn.__name__, inspect.getdoc(fn) or "", schema_from_function(fn), fn, nachfragen, frage)
 
 
-def load_skills(strict: bool = False) -> tuple[list[Skill], list[str]]:
-    """Importiert alle Skill-Module. Gibt (Fähigkeiten, Fehlermeldungen) zurück.
+def _titel(modulname: str) -> str:
+    modul = sys.modules.get(modulname)
+    doc = (getattr(modul, "__doc__", None) or "").strip()
+    return doc.split("\n")[0].strip() if doc else modulname.rsplit(".", 1)[-1]
+
+
+def funktionen() -> dict[str, FunktionInfo]:
+    """Alle geladenen Funktionen, gruppiert nach Modul/Paket in jarvis/skills/."""
+    gruppen: dict[str, FunktionInfo] = {}
+    for s in _REGISTRY.values():
+        g = gruppen.setdefault(s.gruppe, FunktionInfo(s.gruppe, _titel(f"{__name__}.{s.gruppe}")))
+        g.skills.append(s)
+    for d in _DIENSTE.values():
+        g = gruppen.setdefault(d.gruppe, FunktionInfo(d.gruppe, _titel(f"{__name__}.{d.gruppe}")))
+        g.dienste.append(d)
+    return gruppen
+
+
+def verfuegbare_module() -> list[str]:
+    return [m.name for m in pkgutil.iter_modules(__path__) if not m.name.startswith("_")]
+
+
+def load_skills(strict: bool = False, aus: set[str] | frozenset[str] = frozenset()) -> tuple[list[Skill], list[str]]:
+    """Importiert alle Funktions-Module (außer ausgeschalteten). Gibt (Fähigkeiten, Fehlermeldungen) zurück.
 
     Mit strict=True wird beim ersten Fehler eine Exception geworfen (Selbsttest).
     """
     errors: list[str] = []
-    for module in pkgutil.iter_modules(__path__):
-        if module.name.startswith("_"):
+    for modulname in verfuegbare_module():
+        if modulname in aus:
             continue
         try:
-            importlib.import_module(f"{__name__}.{module.name}")
+            importlib.import_module(f"{__name__}.{modulname}")
         except Exception:
             if strict:
                 raise
-            errors.append(f"Fähigkeit '{module.name}' konnte nicht geladen werden:\n{traceback.format_exc()}")
+            errors.append(f"Funktion '{modulname}' konnte nicht geladen werden:\n{traceback.format_exc()}")
     return list(_REGISTRY.values()), errors

@@ -1,6 +1,7 @@
 # Einstellungen für Jarvis.
 # Du kannst diese Datei selbst bearbeiten – oder Jarvis einfach sagen, was er ändern soll.
 # Änderungen werden nach einem Neustart aktiv.
+# Zugangsdaten (Tokens, Passwörter) gehören NICHT hierher – die fragt Jarvis bei Bedarf in einem Fenster ab.
 
 [nutzer]
 name = ""                 # Dein Vorname (optional)
@@ -16,13 +17,18 @@ websuche = true           # Darf Jarvis im Internet nachschlagen?
 [entwickler]
 # Claude Code, der Jarvis' eigenen Code verändert
 modell = "claude-opus-5-5"
+# Kleine Aufträge (Einstellungen, kleine Fähigkeiten, Reparaturen)
 aufwand = "high"
 max_schritte = 150
+max_minuten = 25
+# Große Aufträge (neue Funktionen mit Diensten, Geräten, Konten – z. B. Telegram, 3D-Drucker)
+aufwand_gross = "xhigh"
+max_schritte_gross = 400
+max_minuten_gross = 75
 reparaturversuche = 2     # Wie oft Claude Code nach einem fehlgeschlagenen Selbsttest nachbessern darf
 automatisch_neustarten = true
-# "dontAsk" = nur die erlaubten Werkzeuge nutzen, nie nachfragen
-berechtigungsmodus = "dontAsk"
-erlaubte_werkzeuge = ["Read", "Write", "Edit", "Glob", "Grep", "Bash", "WebSearch", "WebFetch", "TodoWrite"]
+frage_timeout_minuten = 10   # So lange wartet Claude Code auf deine Antwort, bevor es selbst entscheidet
+max_fragen = 3               # Höchstens so viele Rückfragen pro Auftrag
 
 [sprechen]
 engine = "edge"           # "edge" (natürliche Online-Stimme), "offline" (Systemstimme) oder "aus"
@@ -36,3 +42,6 @@ sprache = "de-DE"
 nachfrage_sekunden = 10   # So lange nach einer Antwort darfst du ohne "Jarvis" weiterreden
 mikrofon_index = -1       # -1 = Standardmikrofon. Liste mit /mikrofone
 pause_sekunden = 0.8      # So lange Stille, bis ein Satz als beendet gilt
+
+[ordner]
+eingang = ""              # Ordner für Dateien von außen (Handy, Downloads). Leer = <Benutzerordner>/Jarvis/Eingang

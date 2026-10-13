@@ -69,6 +69,18 @@ class Speaker:
         finally:
             self.on_end()
 
+    async def abspielen(self, datei: Path) -> None:
+        """Spielt eine Audiodatei (mp3/wav) ab – auf demselben Audio-Thread wie die Stimme."""
+        if self.engine == "aus":
+            return
+        self.on_start()
+        try:
+            await asyncio.get_running_loop().run_in_executor(self._executor, self._play_mp3, Path(datei))
+        except Exception as e:  # noqa: BLE001
+            ui.warn(f"Abspielen fehlgeschlagen: {e}")
+        finally:
+            self.on_end()
+
     # --- edge-tts ---------------------------------------------------------
     async def _say_edge(self, text: str) -> None:
         import edge_tts

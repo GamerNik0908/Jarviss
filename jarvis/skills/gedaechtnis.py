@@ -1,12 +1,12 @@
-"""Fähigkeiten rund um Jarvis' Langzeitgedächtnis."""
+"""Gedächtnis: sich Dinge über den Nutzer dauerhaft merken"""
 
 from typing import Annotated
 
 from jarvis import memory
-from jarvis.skills import skill
+from jarvis.api import skill
 
 
-@skill
+@skill(nachfragen="wenn_fremd", frage="Soll ich mir merken: {fakt}?")
 def merken(fakt: Annotated[str, "Der Fakt als kurzer, eigenständiger Satz, z. B. 'Lieblingsfarbe ist Blau'"]) -> str:
     """Merkt sich dauerhaft etwas über den Nutzer oder seine Wünsche (bleibt auch nach Neustarts erhalten).
     Nutze das, wenn der Nutzer sagt "merk dir ..." oder wenn du etwas Wichtiges über ihn erfährst."""
@@ -14,7 +14,7 @@ def merken(fakt: Annotated[str, "Der Fakt als kurzer, eigenständiger Satz, z. B
     return f"Gemerkt: {fakt}"
 
 
-@skill
+@skill(nachfragen="wenn_fremd", frage="Soll ich alles zu „{stichwort}“ vergessen?")
 def vergessen(stichwort: Annotated[str, "Stichwort, das im zu löschenden Fakt vorkommt"]) -> str:
     """Löscht gemerkte Fakten, die das Stichwort enthalten."""
     removed = memory.forget(stichwort)

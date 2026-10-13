@@ -4,7 +4,10 @@ Kümmert sich um alles rund um Jarvis:
   * legt beim ersten Start eine virtuelle Umgebung (.venv) an und installiert die Pakete
   * installiert neue Pakete nach, wenn sich requirements.txt geändert hat
   * startet Jarvis neu, wenn er sich selbst verbessert hat
-  * setzt ein Update automatisch zurück, falls Jarvis danach abstürzt
+  * setzt ein Update automatisch zurück, falls Jarvis danach abstürzt (Code UND Python-Pakete)
+  * verwirft halbfertige Selbst-Änderungen, wenn Jarvis mittendrin beendet wurde
+
+GESCHÜTZTE DATEI (Sicherheitsnetz): Änderungen hieran fragt Jarvis vor dem Übernehmen beim Nutzer nach.
 
 Diese Datei importiert absichtlich nichts aus dem jarvis-Paket: Sie muss auch dann
 funktionieren, wenn eine Selbst-Änderung Jarvis kaputt gemacht hat.
@@ -15,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -73,6 +77,9 @@ def ensure_requirements() -> None:
         return
     say("Installiere/aktualisiere Pakete (das kann beim ersten Mal ein paar Minuten dauern) …")
     if pip("install", "-q", "-r", str(req)) != 0:
+        # Hat ein frisches Update requirements.txt kaputt gemacht? Dann das Update zurücknehmen.
+        if rollback_unconfirmed_update("Die Pakete aus dem letzten Update ließen sich nicht installieren"):
+            return ensure_requirements()
         say("Pakete konnten nicht installiert werden. Internetverbindung prüfen und erneut starten.")
         sys.exit(1)
     for package, hint in OPTIONAL.items():
@@ -101,10 +108,31 @@ def add_hint(text: str) -> None:
     HINTS_FILE.write_text(json.dumps(hints, ensure_ascii=False), encoding="utf-8")
 
 
-def rollback_to(commit: str) -> bool:
+def rollback_to(commit: str, pakete: dict | None = None) -> bool:
+    """Setzt Code (Git) und – bestmöglich – Python-Pakete auf den alten Stand zurück."""
     ok = git("reset", "-q", "--hard", commit).returncode == 0
     git("clean", "-q", "-fd")
+    if isinstance(pakete, dict) and pakete:
+        restore_packages(pakete)
     return ok
+
+
+def _package_name(name: str) -> str:
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def restore_packages(before: dict) -> None:
+    out = subprocess.run([sys.executable, "-m", "pip", "freeze", "--all", "--disable-pip-version-check"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace").stdout
+    now = {}
+    for line in out.splitlines():
+        if "==" in line:
+            name, version = line.split("==", 1)
+            now[_package_name(name)] = version.strip()
+    changed = [f"{n}=={v}" for n, v in before.items() if n in now and now[n] != v]
+    if changed:
+        say(f"Stelle Pakete wieder her: {', '.join(changed)}")
+        pip("install", "-q", *changed, quiet=True)
 
 
 def recover_interrupted_development() -> None:
@@ -112,24 +140,26 @@ def recover_interrupted_development() -> None:
     info = read_json(IN_PROGRESS_FILE)
     if not isinstance(info, dict):
         return
-    if info.get("vorher") and rollback_to(info["vorher"]):
+    if info.get("vorher") and rollback_to(info["vorher"], info.get("pakete")):
         say("Eine unterbrochene Selbst-Änderung wurde zurückgesetzt.")
-        add_hint(f"Die Änderung \"{info.get('auftrag', '')}\" wurde unterbrochen und deshalb verworfen. "
+        name = info.get("titel") or info.get("auftrag", "")[:80]
+        add_hint(f"Die Änderung \"{name}\" wurde unterbrochen und deshalb verworfen. "
                  "Sag Bescheid, wenn ich es noch einmal versuchen soll.")
     IN_PROGRESS_FILE.unlink(missing_ok=True)
 
 
-def rollback_unconfirmed_update() -> bool:
+def rollback_unconfirmed_update(grund: str = "Mein letztes Update hat mich zum Absturz gebracht") -> bool:
     """Ist Jarvis direkt nach einem Update abgestürzt, das Update zurücknehmen."""
     update = read_json(UPDATE_FILE)
     if not isinstance(update, dict) or update.get("bestaetigt") or not update.get("vorher"):
         return False
-    if not rollback_to(update["vorher"]):
+    if not rollback_to(update["vorher"], update.get("pakete")):
         return False
     UPDATE_FILE.unlink(missing_ok=True)
-    say("Jarvis ist nach dem letzten Update abgestürzt – Update wurde zurückgesetzt.")
-    add_hint(f"Mein letztes Update (\"{update.get('auftrag', '')}\") hat mich zum Absturz gebracht. "
-             "Ich habe es automatisch rückgängig gemacht. Die Fehlermeldung steht in der Konsole.")
+    say(f"{grund} – Update wurde zurückgesetzt.")
+    name = update.get("titel") or update.get("auftrag", "")[:80]
+    add_hint(f"{grund} (\"{name}\"). Ich habe es automatisch rückgängig gemacht. "
+             "Die Fehlermeldung steht in der Konsole und im Protokoll.")
     return True
 
 

@@ -1,8 +1,8 @@
-"""Datum und Uhrzeit."""
+"""Datum & Uhrzeit"""
 
 from datetime import datetime
 
-from jarvis.skills import skill
+from jarvis.api import skill
 
 _WOCHENTAGE = ["Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag", "Sonntag"]
 _MONATE = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli",
