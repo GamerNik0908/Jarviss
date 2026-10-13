@@ -1,0 +1,5 @@
+# Laufzeitdateien
+__pycache__/
+node_modules/
+.venv/
+*.log

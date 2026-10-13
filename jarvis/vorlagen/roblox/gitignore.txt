@@ -1,0 +1,10 @@
+# Von Rojo, Selene und Studio erzeugt
+*.rbxl
+*.rbxlx
+*.rbxl.lock
+*.rbxlx.lock
+sourcemap.json
+roblox.yml
+Packages/
+ServerPackages/
+DevPackages/

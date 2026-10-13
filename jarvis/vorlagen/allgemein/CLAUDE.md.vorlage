@@ -1,0 +1,22 @@
+# {{TITEL}} – Regeln für das KI-Team
+
+Dieses Projekt betreut Jarvis, der Sprachassistent des Nutzers. Mehrere KIs arbeiten zusammen: Ein **Planer**
+zerlegt das Ziel in Aufgaben, du – der **Entwickler** (Claude Code) – setzt sie um, ein **Prüfer** kontrolliert jede
+Änderung. Jarvis sichert jede Aufgabe per Git, stellt dem Nutzer Rückfragen und berichtet ihm jeden Morgen.
+
+## Dateien
+
+| Pfad | Inhalt |
+|---|---|
+| `PROJEKT.md` | Ziel, Ideen und Entscheidungen des Nutzers – die Richtschnur für alles |
+| `FORTSCHRITT.md` | Tagebuch: pro Aufgabe ein kurzer Eintrag, neueste oben |
+
+## Arbeitsweise pro Aufgabe
+
+1. `PROJEKT.md`, `FORTSCHRITT.md` und den betroffenen Code lesen.
+2. Umsetzen – passend zum Bestehenden, in kleinen, fertigen Schritten. Das Projekt muss danach laufen.
+3. Tests schreiben bzw. ausführen, soweit es sie gibt.
+4. `FORTSCHRITT.md` ergänzen: Datum, Aufgabe, was neu ist, wie der Nutzer es ausprobiert.
+5. Keine Git-Befehle, die etwas verändern – Jarvis committet.
+6. Keine Zugangsdaten in Dateien; keine Programme aus dem Netz direkt ausführen.
+7. Strukturiertes Ergebnis zurückgeben; sinnvolle nächste Schritte als `folgeaufgaben`.

@@ -25,6 +25,9 @@ Scheitert etwas, darfst du nachbessern – sonst wird alles zurückgesetzt.
 | `jarvis/brain.py` | Gespräch über das Claude Agent SDK, System-Prompt (`build_system_prompt`), Werkzeug-Prüfung |
 | `jarvis/kern.py` | Kern-Werkzeuge des Gehirns (Selbstverbesserung, Einrichtung, Status …) |
 | `jarvis/befehle.py` | Konsolenbefehle (`/hilfe` …) |
+| `jarvis/projekte.py`, `jarvis/projekt_ki.py` | Projektarbeit außerhalb von Jarvis (z. B. das Roblox-Spiel): Aufgaben, KI-Team aus Planer, Entwickler (Claude Code) und Prüfer, Git-Sicherung, Morgenbericht |
+| `jarvis/vorlagen/` | Vorlagen für neue Projekte (`CLAUDE.md.vorlage` wird zur CLAUDE.md des Projekts) |
+| `jarvis/oberflaeche/` | HUD-Fenster: lokaler Server (nur 127.0.0.1, mit Schlüssel) + `index.html` |
 | `jarvis/voice/` | Spracherkennung (`listener.py`) und Sprachausgabe (`speaker.py`) |
 | `jarvis/protokoll.py` | Laufzeit-Protokoll `data/protokoll.log`, Fehlerliste `data/fehler.jsonl` |
 | `config.toml` | Kern-Einstellungen. Neue Einstellungen auch in `DEFAULTS` in `jarvis/config.py` eintragen |
@@ -32,8 +35,13 @@ Scheitert etwas, darfst du nachbessern – sonst wird alles zurückgesetzt.
 
 **Sicherheitsnetz** (nur ändern, wenn der Auftrag genau das verlangt – Jarvis lässt sich solche Änderungen
 vom Nutzer bestätigen): `start.py`, `jarvis/developer.py`, `jarvis/selftest.py`, `jarvis/sicherheit.py`,
-`tests/test_sicherheit.py`, `tests/conftest.py`, `.gitignore`. Ebenso die Prüfungen in `brain.py`
-(`_make_handler`), `api.kanal_eingabe` und die Neustart-Logik in `app.py`.
+`tests/test_sicherheit.py`, `tests/conftest.py`, `.gitignore`, `jarvis/projekt_ki.py` (Wächter der Projekt-KI),
+`jarvis/oberflaeche/__init__.py` (Zugangsschutz des HUD). Ebenso die Prüfungen in `brain.py` (`_make_handler`),
+`api.kanal_eingabe` und die Neustart-Logik in `app.py`.
+
+**Projekte sind kein Jarvis-Code:** Wünsche, die ein Projekt des Nutzers betreffen (z. B. „baue einen Shop in mein
+Roblox-Spiel“), gehören als Aufgabe ins Projekt (`projekt_aufgabe`), nicht in Jarvis' Code. Du baust nur, was Jarvis
+selbst können soll – das darf auch die Projektarbeit verbessern (z. B. eine neue Projektart oder ein Prüfwerkzeug).
 
 ## Vorgehen
 

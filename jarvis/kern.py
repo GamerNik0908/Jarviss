@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Annotated
 
 from jarvis import RESTART_EXIT_CODE, einrichtung, protokoll, ui
 from jarvis.einrichtung import Programm
+from jarvis.projekte import projekt_werkzeuge
 from jarvis.sicherheit import sieht_nach_schluessel_aus
 from jarvis.skills import Skill, funktionen, make_skill
 
@@ -24,33 +25,48 @@ def kern_werkzeuge(app: Jarvis) -> list[Skill]:  # noqa: C901 – bewusst eine S
     async def selbst_verbessern(
         auftrag: Annotated[str, "Ausführlicher Auftrag auf Deutsch: Ziel, alle Antworten des Nutzers, was er schon "
                                 "hat, 3–5 Beispielsätze. Keine Passwörter/Schlüssel."],
-        kurzfassung: Annotated[str, "Ein kurzer Satz zum Vorlesen, z. B. 'Nachrichten zwischen Handy und dir über "
-                                    "Telegram'"],
+        kurzfassung: Annotated[str, "Ein kurzer Satz zum Vorlesen, z. B. 'Dokumente erstellen und drucken'"],
         umfang: Annotated[str, "'klein' für Einstellungen, kleine Fähigkeiten und Reparaturen; 'gross' für neue "
                                "Funktionen mit Diensten, Geräten, Konten oder Hintergrundbetrieb"] = "klein",
         funktion: Annotated[str, "Bei Reparaturen: Name der betroffenen Funktion, sonst leer"] = "",
+        danach: Annotated[str, "Der ursprüngliche Wunsch des Nutzers, den du nach dem Update sofort erledigen sollst "
+                               "(mit allen Details, z. B. 'Erstelle ein Dokument über Vulkane und drucke es aus'); "
+                               "leer, wenn es nur um die Fähigkeit selbst geht"] = "",
     ) -> str:
-        """Verändert Jarvis' eigenen Programmcode mit Claude Code: neue Funktionen (auch große wie Nachrichten aufs
-        Handy, 3D-Drucker, Smart Home), anderes Verhalten, Einstellungen (Stimme, Tempo …), Fehlerbehebungen.
-        Läuft im Hintergrund; danach startet Jarvis neu. Fragt den Nutzer selbst um Zustimmung."""
-        if dev.busy:
-            return (f"Abgelehnt: Claude Code arbeitet noch an „{dev.current_task}“. Ein neuer Auftrag geht erst "
-                    "danach. Ergänzungen zum laufenden Auftrag mit an_entwickler.")
-        if sieht_nach_schluessel_aus(auftrag):
+        """Verändert Jarvis' eigenen Programmcode mit Claude Code: neue Fähigkeiten (auch große wie Dokumente drucken,
+        Nachrichten aufs Handy, 3D-Drucker, Smart Home), anderes Verhalten, Einstellungen, Fehlerbehebungen. Nutze das
+        auch von dir aus, wenn ein Wunsch an einer fehlenden Fähigkeit scheitert. Läuft im Hintergrund; danach startet
+        Jarvis neu und erledigt den Wunsch aus 'danach'. Läuft schon ein Auftrag, kommt dieser in die Warteschlange."""
+        if sieht_nach_schluessel_aus(auftrag) or sieht_nach_schluessel_aus(danach):
             return ("Abgelehnt: Der Auftrag enthält etwas, das wie ein Passwort oder Schlüssel aussieht. Formuliere "
                     "ihn ohne – Zugangsdaten gibt der Nutzer nach dem Update im Eingabefenster ein.")
         umfang = "gross" if umfang.strip().lower() in ("gross", "groß", "big") else "klein"
-        dev.start(auftrag, app.entwicklung_fertig, titel=kurzfassung, umfang=umfang, funktion=funktion.strip())
+        laufend = dev.current_task
+        platz = app.entwicklung_einplanen(auftrag, titel=kurzfassung, umfang=umfang, funktion=funktion.strip(),
+                                          danach=danach.strip())
+        if platz:
+            return (f"Claude Code arbeitet noch an „{laufend or 'einem anderen Auftrag'}“. Dieser Auftrag steht auf "
+                    f"Platz {platz} der Warteschlange und startet danach automatisch. Sag das dem Nutzer kurz.")
+        nach = " Nach dem Neustart erledigst du automatisch den ursprünglichen Wunsch." if danach.strip() else ""
         if umfang == "gross":
             return ("Auftrag an Claude Code übergeben (große Funktion, meist 15 bis 60 Minuten). Sag dem Nutzer, dass "
-                    "er normal weiterreden kann und du dich bei Rückfragen meldest.")
-        return "Auftrag an Claude Code übergeben (meist 2 bis 10 Minuten). Er läuft im Hintergrund."
+                    "er normal weiterreden kann und du dich bei Rückfragen meldest." + nach)
+        return "Auftrag an Claude Code übergeben (meist 2 bis 10 Minuten). Er läuft im Hintergrund." + nach
 
     async def entwicklungsstatus() -> str:
-        """Sagt, ob und woran Claude Code gerade arbeitet: Dauer, Schritt, aktuelle Tätigkeit, offene Rückfrage."""
-        if dev.busy and dev.status:
-            return dev.status.beschreiben()
-        return "Gerade läuft keine Selbstverbesserung."
+        """Sagt, ob und woran Claude Code gerade arbeitet (Dauer, Schritt, Tätigkeit, offene Rückfrage) und was in
+        der Warteschlange steht."""
+        text = dev.status.beschreiben() if dev.busy and dev.status else "Gerade läuft keine Selbstverbesserung."
+        schlange = app.warteschlange()
+        if schlange:
+            text += " Warteschlange: " + "; ".join(f"{i}. {a['titel']}" for i, a in enumerate(schlange, 1))
+        return text
+
+    async def auftrag_streichen(suche: Annotated[str, "Teil des Titels eines Auftrags in der Warteschlange"]) -> str:
+        """Streicht einen wartenden Auftrag aus der Warteschlange der Selbstverbesserung (der laufende wird mit
+        entwicklung_abbrechen gestoppt)."""
+        weg = app.aus_warteschlange_entfernen(suche)
+        return "Gestrichen: " + ", ".join(weg) if weg else f"Nichts zu „{suche}“ in der Warteschlange."
 
     async def an_entwickler(nachricht: Annotated[str, "Antwort auf die Rückfrage oder Ergänzung des Nutzers, "
                                                       "inhaltlich unverändert"]) -> str:
@@ -210,14 +226,19 @@ def kern_werkzeuge(app: Jarvis) -> list[Skill]:  # noqa: C901 – bewusst eine S
         app.exit_code = RESTART_EXIT_CODE
         return f"Funktion '{funktion}' wird {'eingeschaltet' if an else 'ausgeschaltet'}; Neustart nach dieser Antwort."
 
-    immer = {"selbst_verbessern": "Soll Claude Code das umsetzen: {kurzfassung}?",
+    immer = {"selbst_verbessern": "Soll ich mich dafür umprogrammieren: {kurzfassung}?",
              "entwicklung_abbrechen": "Soll ich die Arbeit von Claude Code wirklich abbrechen? Alles bisher "
                                       "Gebaute geht dabei verloren.",
              "programm_installieren": "Soll ich {name} installieren? Windows fragt dabei eventuell nach Erlaubnis."}
     wenn_fremd = {"letzte_aenderung_rueckgaengig", "neu_starten", "jarvis_beenden", "einrichtung_setzen",
-                  "einrichtung_loeschen", "funktion_schalten", "an_entwickler"}
+                  "einrichtung_loeschen", "funktion_schalten", "an_entwickler", "auftrag_streichen"}
+    if app.cfg["entwickler"].get("ohne_nachfrage"):
+        # Der Nutzer will, dass Jarvis sich ohne Rückfrage Neues beibringt – aber nur bei direkten Wünschen.
+        immer.pop("selbst_verbessern")
+        wenn_fremd.add("selbst_verbessern")
     werkzeuge = []
-    for fn in (selbst_verbessern, entwicklungsstatus, an_entwickler, entwicklung_abbrechen, aenderungsverlauf,
+    for fn in (selbst_verbessern, entwicklungsstatus, auftrag_streichen, an_entwickler, entwicklung_abbrechen,
+               aenderungsverlauf,
                letzte_aenderung_rueckgaengig, neu_starten, jarvis_beenden, einrichtung_status, einrichtung_anleitung,
                einrichtung_erfassen, einrichtung_setzen, einrichtung_loeschen, programm_installieren, kanal_koppeln,
                kanal_entkoppeln, faehigkeiten_uebersicht, dienste_status, letzte_fehler, funktion_schalten):
@@ -228,7 +249,7 @@ def kern_werkzeuge(app: Jarvis) -> list[Skill]:  # noqa: C901 – bewusst eine S
             werkzeuge.append(make_skill(fn, nachfragen="wenn_fremd"))
         else:
             werkzeuge.append(make_skill(fn))
-    return werkzeuge
+    return werkzeuge + projekt_werkzeuge(app)
 
 
 async def winget_installieren(paket_id: str) -> int:

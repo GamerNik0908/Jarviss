@@ -253,7 +253,8 @@ def test_waechter_erlaubt(name, eingabe):
 
 def test_sicherheitsnetz_ist_geschuetzt():
     for datei in ("start.py", "jarvis/developer.py", "jarvis/selftest.py", "jarvis/sicherheit.py",
-                  "tests/test_sicherheit.py", "tests/conftest.py"):
+                  "jarvis/projekt_ki.py", "jarvis/oberflaeche/__init__.py", "tests/test_sicherheit.py",
+                  "tests/conftest.py"):
         assert datei in GESCHUETZT
 
 

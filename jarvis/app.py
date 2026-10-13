@@ -32,6 +32,7 @@ from jarvis.developer import UPDATE_FILE, Developer, DevResult
 from jarvis.dienste import Dienstverwaltung
 from jarvis.einrichtung import Einrichtungswert, Programm
 from jarvis.kern import kern_werkzeuge, winget_installieren
+from jarvis.projekte import Projektverwaltung
 from jarvis.sicherheit import (MAX_EREIGNISSE_PRO_STUNDE, Ratenbegrenzer, Zug, ist_zustimmung, schwaerzen,
                                sieht_nach_schluessel_aus)
 from jarvis.skills import dienste, funktionen, load_skills
@@ -41,6 +42,9 @@ from jarvis.voice.speaker import Speaker
 HINTS_FILE = DATA_DIR / "hinweise.json"
 FUNKTIONEN_FILE = DATA_DIR / "funktionen.json"
 LOCK_FILE = DATA_DIR / "jarvis.lock"
+WARTESCHLANGE_FILE = DATA_DIR / "entwicklung_warteschlange.json"
+NACH_UPDATE_FILE = DATA_DIR / "nach_update.json"     # Wunsch, den Jarvis nach dem Neustart erledigen soll
+NEUSTART_HOECHSTENS_WARTEN = 20 * 60                 # so lange wartet ein Neustart auf die laufende Projektaufgabe
 CONNECTION_FAILED_EXIT_CODE = 2
 _log = logging.getLogger("jarvis.app")
 
@@ -106,6 +110,15 @@ class Jarvis:
         self._kanaele: dict[str, Callable[[str], Awaitable[None]]] = {}
         self._rate = Ratenbegrenzer()
         self._lock_datei: Any = None
+        self._offene_projektfrage: _Offen | None = None
+        self._aktueller_auftrag: dict[str, Any] | None = None     # Selbstverbesserung, die gerade läuft
+        self._warteschlange: list[dict[str, Any]] = _json_laden(WARTESCHLANGE_FILE, [])
+        self._neustart_ausstehend = False
+        self._zustand = "bereit"
+        self._im_gespraech = False
+        self._funktionen_cache: tuple[float, list[dict[str, Any]]] = (0.0, [])
+        self.projekte = Projektverwaltung(cfg, gastgeber=self)
+        self.oberflaeche: Any = None
 
     def core_tools(self):  # für Selbsttest/Tests
         return kern_werkzeuge(self)
@@ -122,6 +135,7 @@ class Jarvis:
             return 0
         api._verbinden(self)
         ui.banner()
+        await self._oberflaeche_starten()
 
         skills, errors = load_skills(aus=self.ausgeschaltet)
         for e in errors:
@@ -145,23 +159,32 @@ class Jarvis:
             ui.error(f"Keine Verbindung zu Claude: {e}")
             ui.info("Ist Claude Code installiert und angemeldet? Einmal 'claude' im Terminal starten und /login "
                     "ausführen (oder die Umgebungsvariable ANTHROPIC_API_KEY setzen).")
+            if self.oberflaeche is not None:
+                await self.oberflaeche.stoppen()
             return CONNECTION_FAILED_EXIT_CODE
 
         _confirm_update(fresh_update)
+        nach_update = _json_laden(NACH_UPDATE_FILE, {})
+        NACH_UPDATE_FILE.unlink(missing_ok=True)
         einrichtung.bei_aenderung(lambda name: self._threadsafe(self._einrichtung_geaendert))
         self._start_inputs()
         for hint in hints:
             await self.say(hint)
+        naechster = self._naechsten_auftrag_starten()
         if fresh_update is not None:
-            self._ereignis_einreihen(_update_ereignis(fresh_update), "System")
+            wunsch = str(nach_update.get("wunsch") or "") if fresh_update.get("art") == "update" else ""
+            self._ereignis_einreihen(_update_ereignis(fresh_update, wunsch, naechster), "System")
         else:
             await self.say(greeting(self._anrede))
             fehlend = einrichtung.fehlende()
             if fehlend:
                 ui.info("Noch nicht eingerichtet: " + ", ".join(f"{w.funktion}/{w.name}" for w in fehlend)
                         + " – sag \"Jarvis, richte das ein\" oder tippe /einrichtung")
+            if naechster:
+                await self.say(f"Claude Code macht mit dem nächsten Auftrag weiter: {naechster['titel']}.")
         self.dienste = Dienstverwaltung(dienste(), lambda text, quelle: self.melden(text, quelle))
         self.dienste.starten()
+        self.projekte.starten()
         threading.Thread(target=self._lag_waechter, daemon=True, name="lag-waechter").start()
 
         try:
@@ -197,6 +220,7 @@ class Jarvis:
             await befehl_ausfuehren(self, payload)
         elif kind == "entwickler":
             await self._handle_dev_result(payload)
+        # "wecken": nichts tun – die Hauptschleife prüft danach nur exit_code
 
     async def _herunterfahren(self) -> None:
         """Dienste stoppen, Hintergrundaufgaben beenden, Gehirn trennen – und notfalls hart beenden."""
@@ -206,6 +230,7 @@ class Jarvis:
         watchdog.start()
         if self.dienste:
             await self.dienste.stoppen(5)
+        await self.projekte.stoppen(8)       # eine laufende Projektaufgabe wird zurückgesetzt und später wiederholt
         if self.developer.busy and self.developer._task is not None:
             self.developer._task.cancel()  # setzt den Code sofort zurück (siehe Developer.improve)
             await asyncio.wait({self.developer._task}, timeout=8)
@@ -217,6 +242,14 @@ class Jarvis:
             self.listener.stop()
         if self.brain:
             await self.brain.disconnect()
+        if self.oberflaeche is not None:
+            await self.oberflaeche.stoppen()
+
+    def _neustart(self) -> None:
+        """Neustart aus einer Hintergrundaufgabe heraus (weckt die Hauptschleife)."""
+        if self.exit_code is None:
+            self.exit_code = RESTART_EXIT_CODE
+            self.queue.put_nowait(("wecken", None))
 
     def _instanz_sperren(self) -> bool:
         """Verhindert, dass Jarvis zweimal läuft (doppelte Dienste, doppelte Stimme)."""
@@ -341,12 +374,19 @@ class Jarvis:
                 self._post("eingabe", line)
 
     def _on_speaking_start(self) -> None:
+        self._zustand_setzen("spricht")
         if self.listener:
             self.listener.mute()
 
     def _on_speaking_end(self) -> None:
+        self._zustand_setzen("denkt" if self._im_gespraech else "bereit")
         if self.listener:
             self.listener.unmute()
+
+    def _zustand_setzen(self, zustand: str) -> None:
+        if zustand != self._zustand:
+            self._zustand = zustand
+            ui.zustand(zustand)
 
     async def _handle_typed(self, text: str) -> None:
         if sieht_nach_schluessel_aus(text):
@@ -386,13 +426,23 @@ class Jarvis:
                            + ". Ist die folgende Nachricht die Antwort, gib sie mit an_entwickler weiter.")
         elif self.developer.busy and self.developer.status:
             kontext.append(f"Claude Code arbeitet gerade an: {self.developer.current_task}.")
+        pfrage = self._offene_projektfrage
+        if pfrage is not None and not pfrage.future.done():
+            kontext.append(f"Das Projekt-Team ({pfrage.kanal}) wartet auf eine Antwort auf: „{pfrage.text}“"
+                           + (f" (Vorschlag: {pfrage.vorschlag})" if pfrage.vorschlag else "")
+                           + ". Ist die folgende Nachricht die Antwort, gib sie mit projekt_antworten weiter.")
         prompt = f"<kontext>\n{chr(10).join(kontext)}\n</kontext>\n\n{text}" if kontext else text
         self.brain.zug = zug
+        self._im_gespraech = True
+        self._zustand_setzen("denkt")
         try:
             async for chunk in self.brain.ask(schwaerzen(prompt)):
                 yield chunk
         finally:
             self.brain.zug = None
+            self._im_gespraech = False
+            if self._zustand == "denkt":
+                self._zustand_setzen("bereit")
 
     async def _converse(self, text: str, zug: Zug) -> None:
         ui.info("…")
@@ -547,33 +597,225 @@ class Jarvis:
         frage.future.set_result(schwaerzen(antwort))
         return True
 
+    def projektfrage_beantworten(self, antwort: str) -> bool:
+        frage = self._offene_projektfrage
+        if frage is None or frage.future.done():
+            return False
+        frage.future.set_result(schwaerzen(antwort))
+        return True
+
     # ======================================================================================
-    # Selbstverbesserung
+    # Selbstverbesserung (mit Warteschlange)
     # ======================================================================================
+    def entwicklung_einplanen(self, auftrag: str, *, titel: str = "", umfang: str = "klein", funktion: str = "",
+                              danach: str = "") -> int:
+        """Startet einen Auftrag an Claude Code – oder stellt ihn in die Warteschlange, wenn schon einer läuft.
+
+        danach: der ursprüngliche Wunsch des Nutzers; nach dem Update-Neustart erledigt Jarvis ihn automatisch.
+        Gibt 0 zurück (gestartet) oder den Platz in der Warteschlange.
+        """
+        auftrag_info = {"auftrag": auftrag, "titel": titel or auftrag[:60], "umfang": umfang, "funktion": funktion,
+                        "danach": danach, "zeit": datetime.now().isoformat(timespec="seconds")}
+        if self.developer.busy or self._neustart_ausstehend:
+            self._warteschlange.append(auftrag_info)
+            self._warteschlange_speichern()
+            ui.dev(f"In die Warteschlange (Platz {len(self._warteschlange)}): {auftrag_info['titel']}")
+            return len(self._warteschlange)
+        self._entwicklung_starten(auftrag_info)
+        return 0
+
+    def warteschlange(self) -> list[dict[str, Any]]:
+        return list(self._warteschlange)
+
+    def aus_warteschlange_entfernen(self, suche: str) -> list[str]:
+        suche = suche.strip().lower()
+        weg = [a for a in self._warteschlange if suche and (suche in a["titel"].lower() or suche in a["auftrag"].lower())]
+        self._warteschlange = [a for a in self._warteschlange if a not in weg]
+        self._warteschlange_speichern()
+        return [a["titel"] for a in weg]
+
+    def _warteschlange_speichern(self) -> None:
+        WARTESCHLANGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        WARTESCHLANGE_FILE.write_text(json.dumps(self._warteschlange, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _entwicklung_starten(self, auftrag_info: dict[str, Any]) -> None:
+        self._aktueller_auftrag = auftrag_info
+        self.developer.start(auftrag_info["auftrag"], self.entwicklung_fertig, titel=auftrag_info["titel"],
+                             umfang=auftrag_info["umfang"], funktion=auftrag_info.get("funktion", ""))
+
+    def _naechsten_auftrag_starten(self) -> dict[str, Any] | None:
+        if self.developer.busy or self._neustart_ausstehend or self.exit_code is not None or not self._warteschlange:
+            return None
+        auftrag_info = self._warteschlange.pop(0)
+        self._warteschlange_speichern()
+        ui.dev(f"Nächster Auftrag aus der Warteschlange: {auftrag_info['titel']}")
+        self._entwicklung_starten(auftrag_info)
+        return auftrag_info
+
     async def entwicklung_fertig(self, result: DevResult) -> None:
         await self.queue.put(("entwickler", result))
 
     async def _handle_dev_result(self, result: DevResult) -> None:
+        auftrag_info, self._aktueller_auftrag = self._aktueller_auftrag, None
+        wunsch = (auftrag_info or {}).get("danach", "")
         if result.abgebrochen:
             await self.say(result.zusammenfassung)
+            self._naechsten_auftrag_starten()
             return
         if result.erfolg and result.geaendert:
             text = f"Fertig, {self._anrede}. {result.zusammenfassung}"
             if result.einschraenkungen:
                 text += f" Hinweis: {result.einschraenkungen[0]}"
             await self.say(text)
-            if self.cfg["entwickler"].get("automatisch_neustarten", True):
+            if wunsch:
+                NACH_UPDATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                NACH_UPDATE_FILE.write_text(json.dumps({"wunsch": wunsch, "titel": result.titel}, ensure_ascii=False),
+                                            encoding="utf-8")
+            if not self.cfg["entwickler"].get("automatisch_neustarten", True):
+                await self.say("Das Update wird beim nächsten Neustart aktiv.")
+                self._naechsten_auftrag_starten()
+            elif self.projekte.beschaeftigt:
+                self._neustart_ausstehend = True      # vor dem Sprechen setzen: die Aufgabe kann währenddessen enden
+
+                async def spaetestens() -> None:
+                    await asyncio.sleep(NEUSTART_HOECHSTENS_WARTEN)
+                    self._neustart()
+
+                self._aufgabe(spaetestens(), "Neustart spätestens")
+                await self.say("Ich starte neu, sobald die laufende Projektaufgabe fertig ist.")
+                if not self.projekte.beschaeftigt:
+                    self._neustart()
+            else:
                 await self.say("Ich starte mich kurz neu, um das Update zu aktivieren.")
                 self.exit_code = RESTART_EXIT_CODE
-            else:
-                await self.say("Das Update wird beim nächsten Neustart aktiv.")
             return
+        nachsatz = f" Der ursprüngliche Wunsch des Nutzers war: „{wunsch}“." if wunsch else ""
         if result.erfolg:
-            self._ereignis_einreihen(f"Claude Code ist fertig, es war keine Änderung nötig: {result.zusammenfassung}",
+            self._ereignis_einreihen(f"Claude Code ist fertig, es war keine Änderung nötig: {result.zusammenfassung}"
+                                     + nachsatz, "Claude Code")
+        else:
+            self._ereignis_einreihen(f"Claude Code ist fertig, aber es hat nicht geklappt: {result.zusammenfassung}"
+                                     + nachsatz + " Sag es dem Nutzer kurz und biete an, es noch einmal zu versuchen.",
                                      "Claude Code")
+        naechster = self._naechsten_auftrag_starten()
+        if naechster:
+            self._kontext_merken(f"Claude Code arbeitet jetzt am nächsten Auftrag aus der Warteschlange: "
+                                 f"{naechster['titel']}")
+
+    # ======================================================================================
+    # Projektarbeit (Gastgeber für jarvis.projekte)
+    # ======================================================================================
+    async def projektfrage(self, projekt: str, frage: str, vorschlag: str) -> str | None:
+        """Rückfrage des Projekt-Teams: geht als Ereignis ans Gehirn; die Antwort kommt über projekt_antworten."""
+        assert self.loop is not None
+        fut: asyncio.Future[str] = self.loop.create_future()
+        self._offene_projektfrage = _Offen(fut, frage, vorschlag, kanal=projekt)
+        self._ereignis_einreihen(
+            f"Das Projekt-Team von „{projekt}“ fragt: {frage}" + (f" Vorschlag: {vorschlag}." if vorschlag else "")
+            + " Stell dem Nutzer die Frage kurz in deinen Worten (mit Vorschlag); seine Antwort gibst du mit "
+              "projekt_antworten weiter. Steht die Antwort eindeutig in deinem Gedächtnis, antworte selbst und sag "
+              "dem Nutzer, was du geantwortet hast.", "Projekte")
+        try:
+            return await asyncio.wait_for(asyncio.shield(fut),
+                                          float(self.cfg["entwickler"].get("frage_timeout_minuten", 10)) * 60)
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._offene_projektfrage = None
+
+    def darf_arbeiten(self) -> bool:
+        """Projektarbeit beginnt keine neue Aufgabe, während Jarvis sich selbst umbaut oder gleich neu startet."""
+        return self.exit_code is None and not self._neustart_ausstehend and not self.developer.busy
+
+    def arbeit_beendet(self) -> None:
+        if self._neustart_ausstehend:
+            self._neustart()
+
+    # ======================================================================================
+    # Oberfläche (HUD)
+    # ======================================================================================
+    async def _oberflaeche_starten(self) -> None:
+        if not self.cfg["oberflaeche"].get("an", True):
             return
-        self._ereignis_einreihen(f"Claude Code ist fertig, aber es hat nicht geklappt: {result.zusammenfassung} "
-                                 "Sag es dem Nutzer kurz und biete an, es noch einmal zu versuchen.", "Claude Code")
+        try:
+            from jarvis.oberflaeche import Oberflaeche
+
+            self.oberflaeche = Oberflaeche(self, self.cfg)
+            await self.oberflaeche.starten()
+            self._aufgabe(self.oberflaeche.oeffnen_falls_noetig(), "Oberfläche öffnen")
+        except Exception as e:  # noqa: BLE001 – ohne Oberfläche geht es auch (Konsole)
+            ui.warn(f"Die Oberfläche konnte nicht gestartet werden ({e}) – die Konsole funktioniert weiter.")
+            self.oberflaeche = None
+
+    def oberflaeche_eingabe(self, daten: dict[str, Any]) -> None:
+        """Eingaben aus dem HUD-Fenster (läuft im Event-Loop). Zählt wie die Tastatur am PC."""
+        typ = daten.get("typ")
+        if typ == "eingabe":
+            text = str(daten.get("text", "")).strip()[:4000]
+            if not text:
+                return
+            if text.lower().startswith("/einrichten"):
+                teile = text.split(maxsplit=2)
+                if len(teile) == 3:
+                    ui.info(f"/einrichten {teile[1]} ••••")
+                    self._eingang("einrichten", (teile[1].lower(), teile[2]))
+                    return
+                w = einrichtung.finden(teile[1].lower()) if len(teile) == 2 else None
+                if w is not None and not isinstance(w, Programm):
+                    self.im_hintergrund(self.wert_erfassen(w), name=f"Einrichtung {w.name}")
+                    return
+            self._eingang("befehl" if text.startswith("/") else "eingabe", text)
+        elif typ == "projekt_aufgabe":
+            p = self.projekte.finden(str(daten.get("projekt", "")))
+            text = str(daten.get("text", "")).strip()[:4000]
+            if p is None or not text:
+                return
+            if sieht_nach_schluessel_aus(text):
+                ui.warn("Das sieht aus wie ein Passwort oder Schlüssel – das gebe ich nicht an das Projekt-Team.")
+                return
+            a = self.projekte.aufgabe_hinzufuegen(p, text.split("\n")[0], text,
+                                                  prioritaet=1 if daten.get("wichtig") else 2)
+            ui.projekt(p.name, f"Neue Aufgabe {a.id} von dir: {a.titel}")
+        elif typ == "projekt_aktion":
+            p = self.projekte.finden(str(daten.get("projekt", "")))
+            aktion = str(daten.get("aktion", ""))
+            if p is None or aktion not in ("pausieren", "fortsetzen", "dauerbetrieb_an", "dauerbetrieb_aus",
+                                           "jetzt_planen", "studio_sync_an", "studio_sync_aus", "ordner_oeffnen"):
+                return
+
+            async def ausfuehren() -> None:
+                ui.projekt(p.name, await self.projekte.steuern(p, aktion))
+
+            self._aufgabe(ausfuehren(), f"Projekt {aktion}")
+
+    def oberflaeche_status(self) -> dict[str, Any]:
+        """Alles, was das HUD anzeigt – ohne geheime Werte."""
+        dev = self.developer
+        st = dev.status if dev.busy else None
+        jetzt = time.monotonic()
+        if jetzt - self._funktionen_cache[0] > 15:
+            liste = [{"name": f.name, "titel": f.titel, "bereit": not einrichtung.fehlende(f.name)}
+                     for f in sorted(funktionen().values(), key=lambda f: f.name)]
+            self._funktionen_cache = (jetzt, liste)
+        offen = self._offene_bestaetigung
+        z = self.cfg["zuhoeren"]
+        return {
+            "zustand": self._zustand,
+            "anrede": self._anrede,
+            "stimme": self.speaker.enabled,
+            "mikrofon": self.listener is not None,
+            "aktivierungswort": (z.get("aktivierungswoerter") or ["jarvis"])[0].capitalize()
+            if z.get("modus") == "aktivierungswort" else "",
+            "bestaetigung": offen.text if offen is not None and not offen.future.done() else None,
+            "entwickler": None if st is None else {
+                "titel": st.titel or st.auftrag[:80], "umfang": st.umfang, "phase": st.phase, "meldung": st.meldung,
+                "letzte_aktion": st.letzte_aktion, "schritte": st.schritte, "frage": st.frage,
+                "minuten": int((jetzt - st.start) // 60), "aufgaben": st.aufgaben[:12]},
+            "warteschlange": [a["titel"] for a in self._warteschlange],
+            "neustart_ausstehend": self._neustart_ausstehend,
+            "projekte": self.projekte.uebersicht(),
+            "funktionen": self._funktionen_cache[1],
+        }
 
     # ======================================================================================
     # Einrichtung
@@ -738,7 +980,15 @@ def _confirm_update(update: dict[str, Any] | None) -> None:
         UPDATE_FILE.write_text(json.dumps(update, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def _update_ereignis(update: dict[str, Any]) -> str:
+def _json_laden(datei: Path, standard: Any) -> Any:
+    try:
+        daten = json.loads(datei.read_text(encoding="utf-8"))
+        return daten if isinstance(daten, type(standard)) else standard
+    except (OSError, json.JSONDecodeError):
+        return standard
+
+
+def _update_ereignis(update: dict[str, Any], wunsch: str = "", naechster: dict[str, Any] | None = None) -> str:
     if update.get("art") == "rueckgaengig":
         return (f"Neustart: {update.get('zusammenfassung', 'Die letzte Änderung wurde rückgängig gemacht.')} "
                 "Sag dem Nutzer kurz Bescheid.")
@@ -748,6 +998,12 @@ def _update_ereignis(update: dict[str, Any]) -> str:
     fehlend = einrichtung.fehlende()
     if fehlend:
         text += " Noch nicht eingerichtet: " + "; ".join(f"{w.beschreibung} ({w.name})" for w in fehlend) + "."
+    if naechster:
+        text += f" Claude Code arbeitet jetzt am nächsten Auftrag aus der Warteschlange: {naechster['titel']}."
+    if wunsch:
+        return text + (f" Der Nutzer hatte sich gewünscht: „{wunsch}“ – dafür hast du dir das gerade beigebracht. "
+                       "Sag in einem Satz, was neu ist, und erledige den Wunsch dann sofort mit deinen Werkzeugen. "
+                       "Fehlt dafür noch eine Einrichtung, führe den Nutzer zuerst hindurch.")
     if update.get("ausprobieren"):
         text += f" Beispielsatz zum Ausprobieren: „{update['ausprobieren']}“."
     return text + (" Begrüße den Nutzer kurz (ein bis zwei Sätze) und sag, was neu ist. Fehlt eine Einrichtung, "

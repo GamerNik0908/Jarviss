@@ -1,0 +1,712 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>J.A.R.V.I.S.</title>
+<style>
+  :root {
+    --bg: #02060b;
+    --panel: rgba(6, 18, 30, 0.78);
+    --panel-2: rgba(10, 28, 44, 0.85);
+    --rand: rgba(0, 229, 255, 0.20);
+    --rand-stark: rgba(0, 229, 255, 0.55);
+    --cyan: #00e5ff;
+    --cyan-dunkel: #0a8fa3;
+    --text: #d8f6ff;
+    --text-2: #8fb7c4;
+    --text-3: #5a7f8c;
+    --bernstein: #ffb547;
+    --rot: #ff5c6c;
+    --gruen: #47ffa3;
+    --magenta: #d18bff;
+    --schrift: "Bahnschrift", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+    --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse at 50% 35%, rgba(0, 160, 200, 0.16), transparent 60%),
+      linear-gradient(rgba(0, 229, 255, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(0, 229, 255, 0.035) 1px, transparent 1px);
+    background-size: 100% 100%, 32px 32px, 32px 32px;
+    color: var(--text);
+    font-family: var(--schrift);
+    font-size: 15px;
+    overflow: hidden;
+  }
+  button, input, textarea { font: inherit; color: inherit; }
+  ::selection { background: rgba(0, 229, 255, 0.35); }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(0, 229, 255, 0.18); border-radius: 4px; }
+
+  /* ---------- Kopfzeile ---------- */
+  header {
+    height: 56px; display: flex; align-items: center; gap: 18px; padding: 0 20px;
+    border-bottom: 1px solid var(--rand);
+    background: linear-gradient(180deg, rgba(0, 40, 60, 0.55), rgba(0, 0, 0, 0));
+  }
+  .logo { font-size: 20px; letter-spacing: 0.42em; font-weight: 700; color: var(--cyan);
+          text-shadow: 0 0 12px rgba(0, 229, 255, 0.7); white-space: nowrap; }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; flex: 1; justify-content: center; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px;
+    border: 1px solid var(--rand); background: rgba(0, 20, 30, 0.6); font-size: 12.5px; color: var(--text-2);
+    letter-spacing: 0.04em; white-space: nowrap;
+  }
+  button.chip { cursor: pointer; }
+  button.chip:hover { border-color: var(--rand-stark); color: var(--text); }
+  .punkt { width: 8px; height: 8px; border-radius: 50%; background: var(--text-3); flex: none; }
+  .punkt.an { background: var(--gruen); box-shadow: 0 0 8px var(--gruen); }
+  .punkt.arbeitet { background: var(--bernstein); box-shadow: 0 0 8px var(--bernstein); animation: blinken 1.2s infinite; }
+  .punkt.aus { background: var(--rot); }
+  @keyframes blinken { 50% { opacity: 0.35; } }
+  .uhr { font-family: var(--mono); color: var(--cyan); font-size: 15px; white-space: nowrap; text-align: right; }
+  .uhr small { display: block; color: var(--text-3); font-size: 11px; }
+
+  /* ---------- Raster ---------- */
+  main {
+    height: calc(100% - 56px); display: grid; gap: 14px; padding: 14px;
+    grid-template-columns: minmax(300px, 1fr) minmax(340px, 1.05fr) minmax(330px, 1fr);
+  }
+  .panel {
+    background: var(--panel); border: 1px solid var(--rand); border-radius: 14px; min-height: 0;
+    display: flex; flex-direction: column; position: relative; overflow: hidden;
+    box-shadow: inset 0 0 40px rgba(0, 229, 255, 0.04);
+  }
+  .panel::before, .panel::after {         /* HUD-Ecken */
+    content: ""; position: absolute; width: 16px; height: 16px; border: 2px solid var(--cyan); opacity: 0.55;
+    pointer-events: none;
+  }
+  .panel::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; border-top-left-radius: 14px; }
+  .panel::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; border-bottom-right-radius: 14px; }
+  .panel-kopf {
+    padding: 11px 16px; font-size: 12px; letter-spacing: 0.24em; text-transform: uppercase; color: var(--cyan);
+    border-bottom: 1px solid var(--rand); display: flex; align-items: center; gap: 10px;
+  }
+  .panel-kopf .rechts { margin-left: auto; letter-spacing: 0.04em; text-transform: none; color: var(--text-3); }
+
+  /* ---------- Gespräch ---------- */
+  #gespraech { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .nachricht { max-width: 88%; padding: 9px 13px; border-radius: 12px; line-height: 1.45; white-space: pre-wrap;
+               overflow-wrap: anywhere; }
+  .nachricht .wer { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 3px; opacity: 0.8; }
+  .nachricht.jarvis { align-self: flex-start; background: rgba(0, 229, 255, 0.08); border: 1px solid rgba(0, 229, 255, 0.28); }
+  .nachricht.jarvis .wer { color: var(--cyan); }
+  .nachricht.user { align-self: flex-end; background: rgba(71, 255, 163, 0.07); border: 1px solid rgba(71, 255, 163, 0.28); }
+  .nachricht.user .wer { color: var(--gruen); text-align: right; }
+  .nachricht.kasten { align-self: stretch; max-width: none; background: rgba(255, 181, 71, 0.07);
+                      border: 1px solid rgba(255, 181, 71, 0.35); font-family: var(--mono); font-size: 13px; }
+  .nachricht.kasten .wer { color: var(--bernstein); }
+  .leer { color: var(--text-3); text-align: center; margin: auto; padding: 20px; line-height: 1.6; }
+  .leer b { color: var(--text-2); font-weight: 500; }
+  form.eingabe { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--rand); }
+  .eingabe input {
+    flex: 1; min-width: 0; background: rgba(0, 10, 18, 0.8); border: 1px solid var(--rand); border-radius: 10px;
+    padding: 10px 12px; outline: none;
+  }
+  .eingabe input:focus { border-color: var(--rand-stark); box-shadow: 0 0 0 3px rgba(0, 229, 255, 0.12); }
+  .knopf {
+    background: rgba(0, 229, 255, 0.12); border: 1px solid var(--rand-stark); color: var(--cyan); border-radius: 10px;
+    padding: 9px 14px; cursor: pointer; letter-spacing: 0.06em; white-space: nowrap;
+  }
+  .knopf:hover { background: rgba(0, 229, 255, 0.22); }
+  .knopf.klein { padding: 5px 10px; font-size: 12.5px; border-radius: 8px; }
+  .knopf.warnung { color: var(--bernstein); border-color: rgba(255, 181, 71, 0.6); background: rgba(255, 181, 71, 0.08); }
+  .knopf.gefahr { color: var(--rot); border-color: rgba(255, 92, 108, 0.6); background: rgba(255, 92, 108, 0.08); }
+
+  /* ---------- Kern ---------- */
+  .kern { align-items: center; }
+  .kern-flaeche { flex: 1; width: 100%; min-height: 260px; position: relative; }
+  #reaktor { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .zustand-text { text-align: center; padding: 0 16px; }
+  #zustand { font-size: 13px; letter-spacing: 0.32em; text-transform: uppercase; color: var(--cyan); }
+  #hinweis { color: var(--text-3); font-size: 13px; margin-top: 4px; min-height: 18px; }
+  .bestaetigung {
+    margin: 12px 16px 4px; padding: 14px 16px; border-radius: 12px; width: calc(100% - 32px);
+    border: 1px solid rgba(255, 181, 71, 0.7); background: rgba(255, 181, 71, 0.10);
+    box-shadow: 0 0 30px rgba(255, 181, 71, 0.15); display: none;
+  }
+  .bestaetigung.sichtbar { display: block; animation: auftauchen 0.25s ease-out; }
+  @keyframes auftauchen { from { transform: translateY(6px); opacity: 0; } }
+  .bestaetigung .titel { font-size: 11px; letter-spacing: 0.22em; color: var(--bernstein); text-transform: uppercase; }
+  .bestaetigung .frage { margin: 6px 0 12px; line-height: 1.45; }
+  .bestaetigung .reihe { display: flex; gap: 10px; }
+  .bestaetigung .knopf { flex: 1; font-weight: 600; letter-spacing: 0.18em; }
+  .mini { width: calc(100% - 32px); margin: 10px 16px 16px; padding: 12px 14px; border-radius: 12px;
+          background: var(--panel-2); border: 1px solid var(--rand); font-size: 13.5px; display: none; }
+  .mini.sichtbar { display: block; }
+  .mini .zeile { display: flex; align-items: center; gap: 8px; }
+  .mini .titel { color: var(--magenta); font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase; }
+
+  /* ---------- Reiter ---------- */
+  .reiter { display: flex; border-bottom: 1px solid var(--rand); }
+  .reiter button {
+    flex: 1; background: none; border: 0; border-bottom: 2px solid transparent; padding: 11px 6px; cursor: pointer;
+    font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-3);
+  }
+  .reiter button.aktiv { color: var(--cyan); border-bottom-color: var(--cyan); }
+  .reiter button .zahl { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 9px;
+                         background: rgba(255, 181, 71, 0.2); color: var(--bernstein); font-size: 11px; }
+  .inhalt { flex: 1; overflow-y: auto; padding: 14px; display: none; }
+  .inhalt.aktiv { display: block; }
+
+  .karte { background: var(--panel-2); border: 1px solid var(--rand); border-radius: 12px; padding: 13px 14px;
+           margin-bottom: 12px; }
+  .karte h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: 0.03em; display: flex; gap: 8px;
+              align-items: center; flex-wrap: wrap; }
+  .marke { font-size: 10.5px; letter-spacing: 0.12em; text-transform: uppercase; padding: 2px 7px; border-radius: 6px;
+           border: 1px solid var(--rand); color: var(--text-2); font-weight: 400; }
+  .marke.roblox { color: #ff7b7b; border-color: rgba(255, 123, 123, 0.5); }
+  .marke.gut { color: var(--gruen); border-color: rgba(71, 255, 163, 0.45); }
+  .marke.pause { color: var(--bernstein); border-color: rgba(255, 181, 71, 0.5); }
+  .klein-text { color: var(--text-3); font-size: 12.5px; overflow-wrap: anywhere; }
+  .balken { height: 6px; border-radius: 3px; background: rgba(0, 229, 255, 0.1); margin: 10px 0 4px; overflow: hidden; }
+  .balken > div { height: 100%; background: linear-gradient(90deg, var(--cyan-dunkel), var(--cyan));
+                  box-shadow: 0 0 10px var(--cyan); transition: width 0.6s; }
+  .aktuell { margin-top: 10px; padding: 9px 11px; border-radius: 9px; background: rgba(209, 139, 255, 0.07);
+             border: 1px solid rgba(209, 139, 255, 0.3); font-size: 13.5px; }
+  .aktuell .rolle { color: var(--magenta); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; }
+  .aktuell .aktion { font-family: var(--mono); font-size: 12px; color: var(--text-3); margin-top: 4px;
+                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .frage { margin-top: 8px; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(255, 181, 71, 0.6);
+           background: rgba(255, 181, 71, 0.08); color: var(--bernstein); font-size: 13.5px; }
+  .liste-titel { margin: 12px 0 5px; font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase; color: var(--text-3); }
+  ul.liste { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  ul.liste li { padding: 4px 0; border-bottom: 1px dashed rgba(0, 229, 255, 0.08); display: flex; gap: 7px; }
+  ul.liste li:last-child { border-bottom: 0; }
+  ul.liste .sym { flex: none; width: 16px; text-align: center; }
+  .ok { color: var(--gruen); } .nok { color: var(--rot); } .stern { color: var(--bernstein); } .lauf { color: var(--magenta); }
+  .aktionen { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; }
+  .neue-aufgabe { display: flex; gap: 6px; margin-top: 12px; }
+  .neue-aufgabe input[type=text] { flex: 1; min-width: 0; background: rgba(0, 10, 18, 0.8); border: 1px solid var(--rand);
+                                   border-radius: 8px; padding: 7px 10px; outline: none; font-size: 13.5px; }
+  .neue-aufgabe label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-3); }
+
+  #protokoll { font-family: var(--mono); font-size: 12px; line-height: 1.5; }
+  #protokoll div { padding: 2px 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-2); }
+  #protokoll .zeit { color: var(--text-3); margin-right: 8px; }
+  #protokoll .dev { color: var(--magenta); } #protokoll .projekt { color: #a9b8ff; }
+  #protokoll .warn { color: var(--bernstein); } #protokoll .error { color: var(--rot); }
+
+  .getrennt { position: fixed; left: 50%; top: 66px; transform: translateX(-50%); padding: 8px 16px; border-radius: 999px;
+              background: rgba(255, 92, 108, 0.15); border: 1px solid rgba(255, 92, 108, 0.6); color: var(--rot);
+              font-size: 13px; display: none; z-index: 5; }
+  .getrennt.sichtbar { display: block; }
+
+  /* ---------- Schmal (Laptop hochkant, kleines Fenster) ---------- */
+  @media (max-width: 1080px) {
+    body { overflow: auto; }
+    main { height: auto; grid-template-columns: 1fr; }
+    .kern { order: -1; }
+    .kern-flaeche { min-height: 230px; }
+    .panel { min-height: 420px; }
+    header { height: auto; flex-wrap: wrap; padding: 10px 16px; }
+    .chips { order: 3; flex-basis: 100%; justify-content: flex-start; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">J.A.R.V.I.S.</div>
+  <div class="chips">
+    <span class="chip" id="chip-verbindung"><span class="punkt"></span>Verbinde …</span>
+    <span class="chip" id="chip-mikro"><span class="punkt"></span>Mikrofon</span>
+    <button class="chip" id="chip-stimme" title="Sprachausgabe an/aus"><span class="punkt"></span>Stimme</button>
+    <span class="chip" id="chip-claude"><span class="punkt"></span>Claude Code</span>
+    <span class="chip" id="chip-projekte"><span class="punkt"></span>Projekte</span>
+  </div>
+  <div class="uhr" id="uhr">--:--<small>&nbsp;</small></div>
+</header>
+<div class="getrennt" id="getrennt">Verbindung getrennt – Jarvis startet vermutlich gerade neu …</div>
+
+<main>
+  <!-- Gespräch -->
+  <section class="panel">
+    <div class="panel-kopf">Gespräch <span class="rechts" id="gespraech-info"></span></div>
+    <div id="gespraech">
+      <div class="leer" id="gespraech-leer">Sprich mit mir – oder schreib hier.<br>
+        <b>„Jarvis, erstell mir ein Dokument über Vulkane und druck es aus.“</b><br>
+        Was ich noch nicht kann, bringe ich mir selbst bei.</div>
+    </div>
+    <form class="eingabe" id="eingabe-form" autocomplete="off">
+      <input id="eingabe" placeholder="Schreib Jarvis etwas … (oder /hilfe)" maxlength="4000">
+      <button class="knopf" type="submit">Senden</button>
+    </form>
+  </section>
+
+  <!-- Kern -->
+  <section class="panel kern">
+    <div class="panel-kopf" style="width:100%">Kern <span class="rechts" id="kern-info"></span></div>
+    <div class="kern-flaeche"><canvas id="reaktor"></canvas></div>
+    <div class="zustand-text">
+      <div id="zustand">Bereit</div>
+      <div id="hinweis"></div>
+    </div>
+    <div class="bestaetigung" id="bestaetigung">
+      <div class="titel">Bestätigung nötig</div>
+      <div class="frage" id="bestaetigung-frage"></div>
+      <div class="reihe">
+        <button class="knopf" id="knopf-ja">JA</button>
+        <button class="knopf gefahr" id="knopf-nein">NEIN</button>
+      </div>
+    </div>
+    <div class="mini" id="mini-claude"></div>
+  </section>
+
+  <!-- Reiter -->
+  <section class="panel">
+    <div class="reiter" id="reiter">
+      <button data-ziel="projekte" class="aktiv">Projekte</button>
+      <button data-ziel="lernen">Lernen<span class="zahl" id="zahl-lernen" hidden></span></button>
+      <button data-ziel="funktionen">Funktionen</button>
+      <button data-ziel="protokoll">Protokoll</button>
+    </div>
+    <div class="inhalt aktiv" id="inhalt-projekte"></div>
+    <div class="inhalt" id="inhalt-lernen"></div>
+    <div class="inhalt" id="inhalt-funktionen"></div>
+    <div class="inhalt" id="inhalt-protokoll"><div id="protokoll"></div></div>
+  </section>
+</main>
+
+<script>
+"use strict";
+// ---------- Hilfen (nie innerHTML mit fremdem Text) ----------
+function el(tag, klasse, text) {
+  const e = document.createElement(tag);
+  if (klasse) e.className = klasse;
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  return e;
+}
+function uhrzeit(sek) {
+  const d = sek ? new Date(sek * 1000) : new Date();
+  return d.toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+}
+const $ = (id) => document.getElementById(id);
+
+// ---------- Verbindung ----------
+const schluessel = new URLSearchParams(location.hash.slice(1)).get("schluessel") || "";
+let ws = null;
+let status = {};
+let zustand = "bereit";
+
+function senden(daten) {
+  if (ws && ws.readyState === 1) { ws.send(JSON.stringify(daten)); return true; }
+  return false;
+}
+
+function verbinden() {
+  ws = new WebSocket(`ws://${location.host}/ws?schluessel=${encodeURIComponent(schluessel)}`);
+  ws.onopen = () => { $("getrennt").classList.remove("sichtbar"); chip("chip-verbindung", "an", "Online"); };
+  ws.onclose = () => {
+    $("getrennt").classList.add("sichtbar");
+    chip("chip-verbindung", "aus", "Offline");
+    setTimeout(verbinden, 1500);
+  };
+  ws.onmessage = (ereignis) => {
+    let m;
+    try { m = JSON.parse(ereignis.data); } catch { return; }
+    if (m.typ === "start") {
+      $("gespraech").replaceChildren();
+      $("protokoll").replaceChildren();
+      if (!m.verlauf.some((e) => e.art === "jarvis" || e.art === "user" || e.art === "kasten")) {
+        $("gespraech").append(leerHinweis);
+      }
+      m.verlauf.forEach(eintragen);
+      setzeZustand(m.zustand);
+      statusZeigen(m.status || {});
+    } else if (m.typ === "log") {
+      eintragen(m);
+    } else if (m.typ === "zustand") {
+      setzeZustand(m.zustand);
+    } else if (m.typ === "status") {
+      statusZeigen(m.status || {});
+    }
+  };
+}
+const leerHinweis = $("gespraech-leer");
+if (!schluessel) {
+  $("getrennt").textContent = "Diese Adresse ist unvollständig – öffne das Fenster bitte über Jarvis (/hud).";
+  $("getrennt").classList.add("sichtbar");
+} else {
+  verbinden();
+}
+
+// ---------- Kopfzeile ----------
+function chip(id, art, text) {
+  const c = $(id);
+  const p = el("span", "punkt" + (art ? " " + art : ""));
+  c.replaceChildren(p, document.createTextNode(text));
+}
+setInterval(() => {
+  const jetzt = new Date();
+  const u = $("uhr");
+  u.replaceChildren(document.createTextNode(jetzt.toLocaleTimeString("de-DE")),
+    el("small", "", jetzt.toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" })));
+}, 1000);
+$("chip-stimme").addEventListener("click", () => senden({ typ: "eingabe", text: "/stumm" }));
+
+// ---------- Gespräch & Protokoll ----------
+function eintragen(e) {
+  if (e.art === "jarvis" || e.art === "user" || e.art === "kasten") {
+    leerHinweis.remove();
+    const wer = e.art === "jarvis" ? "Jarvis" : e.art === "kasten" ? (e.titel || "Hinweis")
+      : (e.quelle && e.quelle !== "tastatur" && e.quelle !== "mikrofon" ? `Du · ${e.quelle}` : "Du");
+    const n = el("div", "nachricht " + e.art);
+    n.append(el("div", "wer", `${wer} · ${uhrzeit(e.zeit)}`), el("div", "", e.text));
+    const g = $("gespraech");
+    const unten = g.scrollHeight - g.scrollTop - g.clientHeight < 80;
+    g.append(n);
+    while (g.children.length > 250) g.firstChild.remove();
+    if (unten || e.art === "user") g.scrollTop = g.scrollHeight;
+    if (e.art !== "kasten") return;
+  }
+  const p = $("protokoll");
+  const zeile = el("div", e.art);
+  zeile.append(el("span", "zeit", uhrzeit(e.zeit)),
+    document.createTextNode((e.art === "projekt" ? `[${e.quelle}] ` : e.art === "dev" ? "[Claude Code] " : "") + e.text));
+  const box = $("inhalt-protokoll");
+  const unten = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
+  p.append(zeile);
+  while (p.children.length > 400) p.firstChild.remove();
+  if (unten) box.scrollTop = box.scrollHeight;
+  if (e.art === "dev" || e.art === "projekt") $("kern-info").textContent = e.text.slice(0, 70);
+}
+
+$("eingabe-form").addEventListener("submit", (ereignis) => {
+  ereignis.preventDefault();
+  const feld = $("eingabe");
+  const text = feld.value.trim();
+  if (!text) return;
+  if (senden({ typ: "eingabe", text })) feld.value = "";
+});
+$("knopf-ja").addEventListener("click", () => senden({ typ: "eingabe", text: "ja" }));
+$("knopf-nein").addEventListener("click", () => senden({ typ: "eingabe", text: "nein" }));
+
+// ---------- Reiter ----------
+document.querySelectorAll("#reiter button").forEach((b) => b.addEventListener("click", () => {
+  document.querySelectorAll("#reiter button").forEach((x) => x.classList.toggle("aktiv", x === b));
+  document.querySelectorAll(".inhalt").forEach((x) => x.classList.toggle("aktiv", x.id === "inhalt-" + b.dataset.ziel));
+  if (b.dataset.ziel === "protokoll") $("inhalt-protokoll").scrollTop = 1e9;
+}));
+
+// ---------- Zustand ----------
+const ZUSTAND = { bereit: "Bereit", denkt: "Denkt nach", spricht: "Spricht" };
+function setzeZustand(z) {
+  zustand = z || "bereit";
+  hinweisAktualisieren();
+}
+function hinweisAktualisieren() {
+  const frage = status.bestaetigung;
+  $("zustand").textContent = frage ? "Wartet auf dich" : (ZUSTAND[zustand] || zustand);
+  let hinweis = "";
+  if (frage) hinweis = "Sag „ja“ oder „nein“ – oder klick unten.";
+  else if (zustand === "bereit" && status.aktivierungswort && status.mikrofon) hinweis = `Sag „${status.aktivierungswort}“, um mich anzusprechen.`;
+  else if (zustand === "bereit" && !status.mikrofon) hinweis = "Kein Mikrofon – schreib mir einfach.";
+  $("hinweis").textContent = hinweis;
+}
+
+// ---------- Status ----------
+function statusZeigen(s) {
+  status = s || {};
+  if (status.zustand) zustand = status.zustand;
+  chip("chip-mikro", status.mikrofon ? "an" : "aus", status.mikrofon ? "Mikrofon" : "Kein Mikrofon");
+  chip("chip-stimme", status.stimme ? "an" : "aus", status.stimme ? "Stimme" : "Stumm");
+  const dev = status.entwickler;
+  chip("chip-claude", dev ? "arbeitet" : "", dev ? `Claude Code · ${dev.minuten} min` : "Claude Code bereit");
+  const projekte = status.projekte || [];
+  const arbeitet = projekte.find((p) => p.aktuell);
+  chip("chip-projekte", arbeitet ? "arbeitet" : projekte.length ? "an" : "",
+    projekte.length ? `${projekte.length} Projekt${projekte.length > 1 ? "e" : ""}${arbeitet ? " · arbeitet" : ""}` : "Keine Projekte");
+
+  const b = $("bestaetigung");
+  if (status.bestaetigung) { $("bestaetigung-frage").textContent = status.bestaetigung; b.classList.add("sichtbar"); }
+  else b.classList.remove("sichtbar");
+  hinweisAktualisieren();
+
+  miniZeigen(dev);
+  lernenZeigen(dev);
+  projekteZeigen(projekte);
+  funktionenZeigen(status.funktionen || []);
+}
+
+function miniZeigen(dev) {
+  const m = $("mini-claude");
+  if (!dev) { m.classList.remove("sichtbar"); return; }
+  m.classList.add("sichtbar");
+  const kopf = el("div", "zeile");
+  kopf.append(el("span", "punkt arbeitet"), el("span", "titel", "Ich lerne gerade"));
+  m.replaceChildren(kopf, el("div", "", dev.titel),
+    el("div", "klein-text", `${dev.phase} · ${dev.minuten} min · ${dev.schritte} Schritte`));
+  if (dev.frage) m.append(el("div", "frage", "Frage: " + dev.frage));
+}
+
+function lernenZeigen(dev) {
+  const box = $("inhalt-lernen");
+  const schlange = status.warteschlange || [];
+  const zahl = $("zahl-lernen");
+  zahl.hidden = !dev && !schlange.length;
+  zahl.textContent = String((dev ? 1 : 0) + schlange.length);
+  const teile = [];
+  if (dev) {
+    const k = el("div", "karte");
+    const h = el("h3", "", dev.titel);
+    h.append(el("span", "marke", dev.umfang === "gross" ? "große Funktion" : "klein"));
+    k.append(h, el("div", "klein-text", `${dev.phase} · seit ${dev.minuten} min · ${dev.schritte} Schritte`));
+    if (dev.aufgaben && dev.aufgaben.length) {
+      const fertig = dev.aufgaben.filter((a) => a[1] === "completed").length;
+      const balken = el("div", "balken"); const fuell = el("div"); fuell.style.width = `${Math.round(100 * fertig / dev.aufgaben.length)}%`;
+      balken.append(fuell); k.append(balken);
+      const ul = el("ul", "liste");
+      dev.aufgaben.forEach(([titel, st]) => {
+        const li = el("li");
+        li.append(el("span", "sym " + (st === "completed" ? "ok" : st === "in_progress" ? "lauf" : ""),
+          st === "completed" ? "✓" : st === "in_progress" ? "▸" : "·"), el("span", "", titel));
+        ul.append(li);
+      });
+      k.append(ul);
+    }
+    if (dev.meldung) k.append(el("div", "aktuell", dev.meldung));
+    if (dev.letzte_aktion) k.append(el("div", "klein-text", dev.letzte_aktion));
+    if (dev.frage) k.append(el("div", "frage", "Claude Code fragt: " + dev.frage + " – antworte einfach im Gespräch."));
+    const akt = el("div", "aktionen");
+    const stopp = el("button", "knopf klein gefahr", "Abbrechen");
+    stopp.addEventListener("click", () => {
+      if (confirm("Wirklich abbrechen? Alles bisher Gebaute wird zurückgesetzt.")) senden({ typ: "eingabe", text: "/abbrechen" });
+    });
+    akt.append(stopp);
+    k.append(akt);
+    teile.push(k);
+  }
+  if (schlange.length) {
+    const k = el("div", "karte");
+    k.append(el("div", "liste-titel", "Warteschlange"));
+    const ul = el("ul", "liste");
+    schlange.forEach((t, i) => { const li = el("li"); li.append(el("span", "sym", String(i + 1)), el("span", "", t)); ul.append(li); });
+    k.append(ul);
+    teile.push(k);
+  }
+  if (status.neustart_ausstehend) teile.push(el("div", "frage", "Update fertig – Neustart, sobald die laufende Projektaufgabe abgeschlossen ist."));
+  if (!teile.length) {
+    const leer = el("div", "leer");
+    leer.append(document.createTextNode("Gerade lerne ich nichts Neues."), el("br"),
+      el("b", "", "Sag mir einfach, was ich noch können soll –"), el("br"),
+      document.createTextNode("oder bitte mich um etwas, das ich noch nicht kann. Ich merke das und programmiere es mir selbst."));
+    teile.push(leer);
+  }
+  box.replaceChildren(...teile);
+}
+
+// Projektkarten bleiben bestehen, damit Eingabefelder beim Aktualisieren nicht verloren gehen.
+const karten = new Map();
+function projekteZeigen(projekte) {
+  const box = $("inhalt-projekte");
+  if (!projekte.length) {
+    karten.clear();
+    const leer = el("div", "leer");
+    leer.append(document.createTextNode("Noch kein Projekt."), el("br"),
+      el("b", "", "„Jarvis, lass uns mein Roblox-Spiel neu bauen.“"), el("br"),
+      document.createTextNode("Dann arbeitet mein KI-Team selbstständig daran und berichtet dir jeden Morgen."));
+    box.replaceChildren(leer);
+    return;
+  }
+  const namen = new Set(projekte.map((p) => p.name));
+  for (const [name, k] of karten) if (!namen.has(name)) { k.wurzel.remove(); karten.delete(name); }
+  if (box.querySelector(".leer")) box.replaceChildren();
+  projekte.forEach((p) => {
+    let k = karten.get(p.name);
+    if (!k) { k = karteBauen(p.name); karten.set(p.name, k); box.append(k.wurzel); }
+    karteFuellen(k, p);
+  });
+}
+
+function karteBauen(name) {
+  const wurzel = el("div", "karte");
+  const dynamisch = el("div");
+  const aktionen = el("div", "aktionen");
+  const form = el("form", "neue-aufgabe");
+  const feld = el("input"); feld.type = "text"; feld.placeholder = "Neue Aufgabe fürs Team …"; feld.maxLength = 4000;
+  const wichtig = el("input"); wichtig.type = "checkbox";
+  const label = el("label"); label.append(wichtig, document.createTextNode("wichtig"));
+  const knopf = el("button", "knopf klein", "Hinzufügen"); knopf.type = "submit";
+  form.append(feld, label, knopf);
+  form.addEventListener("submit", (ereignis) => {
+    ereignis.preventDefault();
+    const text = feld.value.trim();
+    if (text && senden({ typ: "projekt_aufgabe", projekt: name, text, wichtig: wichtig.checked })) { feld.value = ""; wichtig.checked = false; }
+  });
+  wurzel.append(dynamisch, aktionen, form);
+  return { wurzel, dynamisch, aktionen };
+}
+
+function aktionsKnopf(projekt, aktion, text, klasse) {
+  const b = el("button", "knopf klein" + (klasse ? " " + klasse : ""), text);
+  b.addEventListener("click", () => senden({ typ: "projekt_aktion", projekt, aktion }));
+  return b;
+}
+
+function karteFuellen(k, p) {
+  const teile = [];
+  const h = el("h3", "", p.titel);
+  if (p.art === "roblox") h.append(el("span", "marke roblox", "Roblox"));
+  h.append(el("span", "marke " + (p.pausiert ? "pause" : "gut"), p.pausiert ? "pausiert" : p.limit_pause_bis ? `Limit bis ${p.limit_pause_bis}` : "aktiv"));
+  if (p.dauerbetrieb) h.append(el("span", "marke", "Dauerbetrieb"));
+  if (p.sync) h.append(el("span", "marke gut", "Studio-Sync"));
+  teile.push(h);
+  const balken = el("div", "balken"); const fuell = el("div");
+  fuell.style.width = p.gesamt ? `${Math.round(100 * p.erledigt / p.gesamt)}%` : "0%";
+  balken.append(fuell);
+  teile.push(balken, el("div", "klein-text", `${p.erledigt} von ${p.gesamt} Aufgaben erledigt`));
+  if (p.aktuell) {
+    const a = el("div", "aktuell");
+    a.append(el("div", "rolle", `${p.aktuell.rolle} · ${p.aktuell.minuten} min`), el("div", "", p.aktuell.aufgabe));
+    if (p.aktuell.meldung) a.append(el("div", "klein-text", p.aktuell.meldung));
+    if (p.aktuell.letzte_aktion) a.append(el("div", "aktion", p.aktuell.letzte_aktion));
+    if (p.aktuell.frage) a.append(el("div", "frage", "Frage an dich: " + p.aktuell.frage));
+    teile.push(a);
+  }
+  if (p.notiz) teile.push(el("div", "frage", "Planer: " + p.notiz));
+  if (p.offen.length) {
+    teile.push(el("div", "liste-titel", "Als Nächstes"));
+    const ul = el("ul", "liste");
+    p.offen.forEach((a) => { const li = el("li"); li.append(el("span", "sym " + (a.nutzer ? "stern" : ""), a.nutzer ? "★" : "·"), el("span", "", a.titel)); ul.append(li); });
+    teile.push(ul);
+  }
+  if (p.fertig.length) {
+    teile.push(el("div", "liste-titel", "Zuletzt"));
+    const ul = el("ul", "liste");
+    p.fertig.forEach((a) => {
+      const li = el("li"); li.title = a.ergebnis;
+      const text = el("span"); text.append(document.createTextNode(a.titel + " "), el("span", "klein-text", a.wann));
+      li.append(el("span", "sym " + (a.ok ? "ok" : "nok"), a.ok ? "✓" : "✗"), text);
+      ul.append(li);
+    });
+    teile.push(ul);
+  }
+  teile.push(el("div", "klein-text", p.ordner));
+  k.dynamisch.replaceChildren(...teile);
+  const knoepfe = [
+    p.pausiert ? aktionsKnopf(p.name, "fortsetzen", "Weiter") : aktionsKnopf(p.name, "pausieren", "Pause", "warnung"),
+    aktionsKnopf(p.name, p.dauerbetrieb ? "dauerbetrieb_aus" : "dauerbetrieb_an", p.dauerbetrieb ? "Dauerbetrieb aus" : "Dauerbetrieb an"),
+    aktionsKnopf(p.name, "jetzt_planen", "Weiterplanen"),
+  ];
+  if (p.art === "roblox") knoepfe.push(aktionsKnopf(p.name, p.sync ? "studio_sync_aus" : "studio_sync_an", p.sync ? "Studio-Sync aus" : "Studio-Sync an"));
+  knoepfe.push(aktionsKnopf(p.name, "ordner_oeffnen", "Ordner"));
+  k.aktionen.replaceChildren(...knoepfe);
+}
+
+function funktionenZeigen(liste) {
+  const box = $("inhalt-funktionen");
+  const k = el("div", "karte");
+  const ul = el("ul", "liste");
+  liste.forEach((f) => {
+    const li = el("li");
+    li.append(el("span", "sym " + (f.bereit ? "ok" : "stern"), f.bereit ? "●" : "○"), el("span", "", f.titel));
+    if (!f.bereit) li.append(el("span", "klein-text", " – Einrichtung fehlt"));
+    ul.append(li);
+  });
+  k.append(ul);
+  const tipp = el("div", "leer");
+  tipp.append(el("b", "", "Fehlt dir etwas?"), el("br"),
+    document.createTextNode("Sag einfach „Jarvis, ich hätte gern, dass du …“ – ich baue es mir selbst."));
+  box.replaceChildren(k, tipp);
+}
+
+// ---------- Reaktor (der animierte Kern) ----------
+const leinwand = $("reaktor");
+const ctx = leinwand.getContext("2d");
+let pegel = 0;
+function zeichnen(t) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = leinwand.clientWidth, h = leinwand.clientHeight;
+  if (leinwand.width !== Math.round(w * dpr) || leinwand.height !== Math.round(h * dpr)) {
+    leinwand.width = Math.round(w * dpr); leinwand.height = Math.round(h * dpr);
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const cx = w / 2, cy = h / 2, r = Math.max(40, Math.min(w, h) * 0.36);
+  const sek = t / 1000;
+  const wartet = !!status.bestaetigung;
+  const farbe = wartet ? "255,181,71" : "0,229,255";
+  const tempo = zustand === "denkt" ? 2.6 : zustand === "spricht" ? 1.4 : 0.5;
+  const ziel = zustand === "spricht" ? 0.55 + 0.45 * Math.abs(Math.sin(sek * 7.3) * Math.sin(sek * 3.1 + 1))
+    : zustand === "denkt" ? 0.25 : 0.08;
+  pegel += (ziel - pegel) * 0.12;
+
+  // Glühen
+  const glow = ctx.createRadialGradient(cx, cy, r * 0.05, cx, cy, r * 1.25);
+  glow.addColorStop(0, `rgba(${farbe},${0.35 + pegel * 0.35})`);
+  glow.addColorStop(0.35, `rgba(${farbe},0.10)`);
+  glow.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(cx, cy, r * 1.25, 0, Math.PI * 2); ctx.fill();
+
+  ctx.lineCap = "round";
+  // Äußerer Ring mit Skala
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(sek * 0.12 * tempo);
+  for (let i = 0; i < 120; i++) {
+    const lang = i % 10 === 0;
+    ctx.strokeStyle = `rgba(${farbe},${lang ? 0.75 : 0.28})`; ctx.lineWidth = lang ? 2 : 1;
+    const a = (i / 120) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * r * 1.02, Math.sin(a) * r * 1.02);
+    ctx.lineTo(Math.cos(a) * r * (lang ? 1.09 : 1.06), Math.sin(a) * r * (lang ? 1.09 : 1.06));
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // Segmentringe (gegenläufig)
+  const ringe = [[0.9, 6, 0.42, 1], [0.76, 3, 0.9, -1.6], [0.64, 12, 0.18, 2.4]];
+  ringe.forEach(([fr, anzahl, laenge, richtung]) => {
+    ctx.save(); ctx.translate(cx, cy); ctx.rotate(sek * 0.35 * tempo * richtung);
+    ctx.strokeStyle = `rgba(${farbe},0.8)`; ctx.lineWidth = fr > 0.85 ? 3 : 2;
+    ctx.shadowColor = `rgba(${farbe},0.9)`; ctx.shadowBlur = 8;
+    for (let i = 0; i < anzahl; i++) {
+      const start = (i / anzahl) * Math.PI * 2;
+      ctx.beginPath(); ctx.arc(0, 0, r * fr, start, start + (Math.PI * 2 / anzahl) * laenge); ctx.stroke();
+    }
+    ctx.restore();
+  });
+
+  // Schallwelle beim Sprechen
+  if (pegel > 0.12) {
+    ctx.save(); ctx.translate(cx, cy);
+    const balken = 72;
+    for (let i = 0; i < balken; i++) {
+      const a = (i / balken) * Math.PI * 2;
+      const ausschlag = r * 0.1 * pegel * (0.4 + 0.6 * Math.abs(Math.sin(i * 0.9 + sek * 9) * Math.cos(i * 0.37 - sek * 5)));
+      ctx.strokeStyle = `rgba(${farbe},${0.25 + pegel * 0.6})`; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a) * r * 0.5, Math.sin(a) * r * 0.5);
+      ctx.lineTo(Math.cos(a) * (r * 0.5 + ausschlag), Math.sin(a) * (r * 0.5 + ausschlag));
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  // Innerer Kern
+  const atmen = 0.5 + 0.5 * Math.sin(sek * (zustand === "denkt" ? 4 : 1.4));
+  const kern = ctx.createRadialGradient(cx, cy, 0, cx, cy, r * 0.42);
+  kern.addColorStop(0, "rgba(235,255,255,0.95)");
+  kern.addColorStop(0.25, `rgba(${farbe},${0.75 + 0.2 * atmen})`);
+  kern.addColorStop(0.7, `rgba(${farbe},0.12)`);
+  kern.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = kern; ctx.beginPath(); ctx.arc(cx, cy, r * (0.4 + 0.03 * atmen + 0.06 * pegel), 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = `rgba(${farbe},0.9)`; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.arc(cx, cy, r * 0.5, 0, Math.PI * 2); ctx.stroke();
+
+  // Denken: kreisende Punkte
+  if (zustand === "denkt") {
+    for (let i = 0; i < 3; i++) {
+      const a = sek * 3 + i * (Math.PI * 2 / 3);
+      ctx.fillStyle = `rgba(${farbe},0.95)`;
+      ctx.beginPath(); ctx.arc(cx + Math.cos(a) * r * 0.83, cy + Math.sin(a) * r * 0.83, 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  requestAnimationFrame(zeichnen);
+}
+requestAnimationFrame(zeichnen);
+</script>
+</body>
+</html>

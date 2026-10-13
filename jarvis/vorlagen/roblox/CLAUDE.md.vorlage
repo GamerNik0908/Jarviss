@@ -1,0 +1,73 @@
+# {{TITEL}} – Regeln für das KI-Team
+
+Dieses Roblox-Spiel betreut Jarvis, der Sprachassistent des Nutzers. Mehrere KIs arbeiten zusammen: Ein **Planer**
+zerlegt das Ziel in Aufgaben, du – der **Entwickler** (Claude Code) – setzt sie um, ein **Prüfer** kontrolliert jede
+Änderung. Jarvis sichert jede Aufgabe per Git, stellt dem Nutzer Rückfragen und berichtet ihm jeden Morgen.
+
+## Aufbau
+
+| Pfad | Inhalt |
+|---|---|
+| `PROJEKT.md` | Ziel, Ideen und Entscheidungen des Nutzers – die Richtschnur für alles |
+| `FORTSCHRITT.md` | Tagebuch: pro Aufgabe ein kurzer Eintrag, neueste oben |
+| `docs/` | Spieldesign und Architektur, sobald das Spiel wächst (z. B. `docs/ARCHITEKTUR.md`) |
+| `default.project.json` | Rojo: welcher Ordner wo in Roblox landet |
+| `src/server/` | `ServerScriptService.Server` (Script): Spiellogik, Belohnungen, Daten – alles Vertrauenswürdige |
+| `src/client/` | `StarterPlayer.StarterPlayerScripts.Client` (LocalScript): Steuerung, Oberfläche, Effekte |
+| `src/shared/` | `ReplicatedStorage.Shared` (ModuleScripts): Konfiguration, Typen, gemeinsame Hilfen |
+
+Rojo-Dateinamen: `*.server.luau` = Script, `*.client.luau` = LocalScript, `*.luau` = ModuleScript; `init.*.luau`
+macht den Ordner selbst zum Skript. Neue Bereiche (z. B. `ServerStorage`, `StarterGui`) in `default.project.json`
+eintragen. Oberflächen am besten im Code bauen (oder als `*.model.json`), damit sie in Git stehen.
+
+## Luau
+
+- Jede Datei beginnt mit `--!strict`; öffentliche Funktionen bekommen Typen.
+- Moderne APIs: `task.wait/spawn/delay` statt `wait/spawn/delay`, Dienste über `game:GetService(...)`.
+- Module statt globaler Variablen, kleine Funktionen, sprechende Namen. Kommentare auf Deutsch.
+- Verbindungen (`:Connect`) trennen, wenn Spieler/Objekte verschwinden – keine Speicherlecks.
+- Das Spiel muss nach jeder Aufgabe startbar sein. Lieber kleine, fertige Schritte als große halbe.
+- Handy und Tablet mitdenken: Touch-Steuerung, lesbare Schrift, keine Tastatur-only-Funktionen.
+
+## Sicherheit – bei Roblox besonders wichtig
+
+- **Der Client lügt.** Alles, was über RemoteEvents/RemoteFunctions kommt, prüft der Server: Typen, Grenzen,
+  Abstand, Abklingzeit, Besitz. Belohnungen, Währung, Schaden und Inventar entscheidet nur der Server.
+- Kein `loadstring`, kein `require(<Asset-ID>)`, kein `getfenv/setfenv`, keine HTTP-Aufrufe an fremde Server,
+  keine Hintertüren oder Admin-Befehle für Fremde.
+- Modelle aus dem Creator Store nur ohne Skripte – fremde Skripte darin entfernen.
+- DataStores nur auf dem Server: `pcall` mit Wiederholungen, `UpdateAsync` statt blind überschreiben, beim
+  Verlassen und in `game:BindToClose` speichern, Datenformat versionieren, nie Spielerdaten löschen.
+- Inhalte altersgerecht nach den Roblox-Community-Regeln.
+- Keine Käufe, Game Passes oder Developer Products einbauen oder ändern, ohne dass der Nutzer es ausdrücklich will.
+
+## Prüfen
+
+Soweit installiert (Rokit installiert sie aus `rokit.toml`):
+
+- `selene src` – findet Fehler und typische Probleme
+- `stylua src` formatiert, `stylua --check src` prüft die Formatierung
+- `rojo build default.project.json -o "<Temp-Ordner>/test.rbxlx"` – prüft, ob Rojo das Projekt bauen kann
+
+Jarvis führt diese Prüfungen nach jeder Aufgabe selbst aus. Werkzeuge nicht selbst installieren oder hinzufügen.
+
+## Roblox Studio (wenn verbunden)
+
+Sind Werkzeuge `mcp__Roblox_Studio__…` vorhanden, ist Roblox Studio über seinen eingebauten MCP-Server verbunden:
+
+- Zuerst `list_roblox_studios` – ist kein Studio offen, arbeitest du nur mit den Dateien.
+- Testen: `start_stop_play` → `get_console_output` / `screen_capture` / `character_navigation` → Playtest beenden.
+- Erkunden: `search_game_tree`, `inspect_instance`, `script_read`.
+- 3D-Inhalte mit der Roblox-KI: `generate_mesh`, `generate_material`, `generate_procedural_model`.
+- Code gehört trotzdem nach `src/` (Rojo überträgt ihn live nach Studio, wenn der Live-Abgleich läuft).
+- Was nur in Studio existiert (Gelände, platzierte Modelle), steht nicht in Git: in `FORTSCHRITT.md` notieren –
+  besser gleich per Code oder als `*.model.json` erzeugen.
+
+## Arbeitsweise pro Aufgabe
+
+1. `PROJEKT.md`, `FORTSCHRITT.md` und den betroffenen Code lesen.
+2. Umsetzen – passend zum Bestehenden, ohne Unnötiges umzubauen.
+3. Prüfen (siehe oben), wenn möglich im Playtest.
+4. `FORTSCHRITT.md` ergänzen: Datum, Aufgabe, was neu ist, wie der Nutzer es ausprobiert.
+5. Keine Git-Befehle, die etwas verändern – Jarvis committet.
+6. Strukturiertes Ergebnis zurückgeben; sinnvolle nächste Schritte als `folgeaufgaben`.

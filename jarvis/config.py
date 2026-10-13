@@ -38,6 +38,28 @@ DEFAULTS: dict[str, Any] = {
         "automatisch_neustarten": True,
         "frage_timeout_minuten": 10,
         "max_fragen": 3,
+        # True: Neue Fähigkeiten ohne "Soll ich …?" bauen, wenn der Wunsch direkt vom Nutzer kommt
+        "ohne_nachfrage": False,
+    },
+    "oberflaeche": {
+        "an": True,
+        "fenster": "app",      # "app" (eigenes Fenster über Edge/Chrome), "browser" oder "aus"
+        "port": 47800,
+    },
+    "projekte": {
+        "ordner": "",          # leer = <Benutzerordner>/Jarvis/Projekte
+        "modell": "claude-opus-5-5",            # Entwickler (Claude Code)
+        "modell_planer": "claude-opus-5-5",
+        "modell_pruefer": "claude-sonnet-5-5",
+        "aufwand": "high",
+        "max_minuten_pro_aufgabe": 45,
+        "max_schritte_pro_aufgabe": 250,
+        "pruef_runden": 2,
+        "max_auto_aufgaben_pro_tag": 12,
+        "pause_minuten": 2,
+        "bericht_uhrzeit": "08:00",
+        "ruhezeit": "22:00-07:30",
+        "roblox_studio": True,
     },
     "sprechen": {
         "engine": "edge",

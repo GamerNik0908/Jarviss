@@ -13,11 +13,13 @@ if TYPE_CHECKING:
 HILFE = """Befehle:
   /hilfe                        Diese Hilfe
   /verbessern [gross] <text>    Auftrag direkt an Claude Code (ohne Umweg übers Gespräch)
-  /status                       Woran Claude Code gerade arbeitet
+  /status                       Woran Claude Code gerade arbeitet (und was in der Warteschlange steht)
   /antwort <text>               Rückfrage von Claude Code beantworten
   /abbrechen                    Laufende Selbstverbesserung abbrechen (alles wird zurückgesetzt)
   /verlauf  /rueckgaengig       Selbst-Änderungen anzeigen / letzte rückgängig machen
   /funktionen                   Alle Funktionen und ihr Zustand
+  /projekte                     Stand aller Projekte (z. B. dein Roblox-Spiel)
+  /hud                          Das Jarvis-Fenster (Oberfläche) öffnen
   /aus <name>  /an <name>       Funktion aus- bzw. einschalten
   /einrichtung [funktion]       Was eingerichtet ist und was fehlt
   /einrichten <name> [wert]     Wert speichern (ohne Wert: verdeckte Eingabe)
@@ -67,17 +69,29 @@ async def befehl_ausfuehren(app: Jarvis, zeile: str) -> None:  # noqa: C901 – 
     elif cmd == "verbessern":
         if not arg:
             ui.info("Beispiel: /verbessern gross Ich will mir Nachrichten aufs Handy schicken können (Telegram).")
-        elif dev.busy:
-            ui.warn(f"Claude Code arbeitet noch an: {dev.current_task}")
         else:
             erstes, _, rest = arg.partition(" ")
             if erstes.lower() in ("gross", "groß", "klein") and rest:
                 umfang, auftrag = ("gross" if erstes.lower() != "klein" else "klein"), rest
             else:
                 umfang, auftrag = ("gross" if len(arg) > 150 else "klein"), arg
-            dev.start(auftrag, app.entwicklung_fertig, umfang=umfang)
+            app.entwicklung_einplanen(auftrag, titel=auftrag[:60], umfang=umfang)
     elif cmd == "status":
         ui.info(dev.status.beschreiben() if dev.busy and dev.status else "Gerade läuft keine Selbstverbesserung.")
+        for i, auftrag in enumerate(app.warteschlange(), 1):
+            ui.info(f"Warteschlange {i}: {auftrag['titel']}")
+    elif cmd == "projekte":
+        projekte = list(app.projekte.projekte.values())
+        if not projekte:
+            ui.info("Noch keine Projekte. Sag z. B.: Jarvis, lass uns mein Roblox-Spiel neu bauen.")
+        for p in projekte:
+            ui.kasten(f"Projekt {p.titel}", app.projekte.status_text(p))
+    elif cmd == "hud":
+        if app.oberflaeche is None:
+            ui.info("Die Oberfläche ist aus (config.toml: [oberflaeche] an = true).")
+        else:
+            app.oberflaeche.fenster_oeffnen()
+            ui.info(f"Oberfläche: {app.oberflaeche.url}")
     elif cmd == "antwort":
         if not arg:
             ui.info("Beispiel: /antwort Bambu Lab A1")

@@ -1,0 +1,6 @@
+# Werkzeuge für dieses Roblox-Projekt, verwaltet von Rokit (https://github.com/rojo-rbx/rokit).
+# Installieren: "Jarvis, richte die Roblox-Werkzeuge ein" – oder im Projektordner: rokit install
+[tools]
+rojo = "rojo-rbx/rojo@7.7.0"
+selene = "Kampfkarren/selene@0.31.0"
+stylua = "JohnnyMorganz/StyLua@2.5.2"

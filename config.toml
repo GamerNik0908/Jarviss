@@ -29,6 +29,31 @@ reparaturversuche = 2     # Wie oft Claude Code nach einem fehlgeschlagenen Selb
 automatisch_neustarten = true
 frage_timeout_minuten = 10   # So lange wartet Claude Code auf deine Antwort, bevor es selbst entscheidet
 max_fragen = 3               # Höchstens so viele Rückfragen pro Auftrag
+# false: Kann Jarvis etwas noch nicht, fragt er kurz "Soll ich mich dafür umprogrammieren?".
+# true:  Bei Wünschen direkt von dir legt er ohne Rückfrage los (sag "abbrechen", wenn du es doch nicht willst).
+ohne_nachfrage = false
+
+[oberflaeche]
+an = true                 # Das Jarvis-Fenster (HUD): Gespräch, Zustand, Claude Code, Projekte
+fenster = "app"           # "app" (eigenes Fenster über Edge/Chrome), "browser" (normaler Tab) oder "aus" (nur mit /hud)
+port = 47800              # Nur auf diesem PC erreichbar (127.0.0.1)
+
+[projekte]
+# Projekte, an denen Jarvis selbstständig arbeitet – z. B. dein Roblox-Spiel. Ein KI-Team aus Planer,
+# Entwickler (Claude Code) und Prüfer arbeitet Aufgabe für Aufgabe ab; jede Aufgabe wird per Git gesichert.
+ordner = ""               # Wo neue Projekte landen. Leer = <Benutzerordner>/Jarvis/Projekte
+modell = "claude-opus-5-5"            # Entwickler
+modell_planer = "claude-opus-5-5"     # Planer
+modell_pruefer = "claude-sonnet-5-5"  # Prüfer
+aufwand = "high"
+max_minuten_pro_aufgabe = 45
+max_schritte_pro_aufgabe = 250
+pruef_runden = 2          # So oft darf der Entwickler nachbessern, wenn der Prüfer etwas findet
+max_auto_aufgaben_pro_tag = 12   # Aufgaben, die sich das Team pro Tag selbst vornimmt (deine laufen immer)
+pause_minuten = 2         # Pause zwischen zwei Aufgaben
+bericht_uhrzeit = "08:00" # Morgenbericht (wird nachgeholt, wenn der PC später angeht)
+ruhezeit = "22:00-07:30"  # Nachts arbeitet das Team leise weiter: keine Ansagen, Rückfragen entscheidet es selbst
+roblox_studio = true      # Claude Code mit Roblox Studio verbinden, wenn dort der MCP-Server eingeschaltet ist
 
 [sprechen]
 engine = "edge"           # "edge" (natürliche Online-Stimme), "offline" (Systemstimme) oder "aus"

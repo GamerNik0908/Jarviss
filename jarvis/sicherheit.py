@@ -23,6 +23,8 @@ GESCHUETZT = (
     "jarvis/developer.py",
     "jarvis/selftest.py",
     "jarvis/sicherheit.py",
+    "jarvis/projekt_ki.py",          # Wächter der Projekt-KI
+    "jarvis/oberflaeche/__init__.py",  # Zugangsschutz des HUD-Fensters
     "tests/test_sicherheit.py",
     "tests/conftest.py",
     ".gitignore",
